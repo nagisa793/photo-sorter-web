@@ -84,7 +84,14 @@ async function loadOneThumb(job){
       img.dataset.thumbLoaded='1';
       url=null;
     }
-  }catch(e){console.warn('サムネイル読み込み失敗',e)}
+  }catch(e){
+    console.warn('サムネイル読み込み失敗',e);
+    const tries=Number(img?.dataset?.thumbRetries||0)+1;
+    if(img?.dataset)img.dataset.thumbRetries=String(tries);
+    if(tries<=2&&epoch===thumbEpoch&&img?.isConnected&&img.dataset.thumbWanted==='1'){
+      setTimeout(()=>{if(img.isConnected&&img.dataset.thumbWanted==='1'&&!img.dataset.thumbLoaded)queueThumb(img,epoch)},180*tries);
+    }
+  }
   finally{
     if(url)try{URL.revokeObjectURL(url)}catch(_){}
     if(img?.dataset)delete img.dataset.thumbLoading;
