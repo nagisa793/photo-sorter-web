@@ -38,7 +38,8 @@ function thumb(id,opts={}){const p=photo(id);if(!p)return '';let sel=ui.ids.has(
 async function assetUrl(id,thumbnail=true){
   if(thumbnail){
     const obj=await txGet('assets',id);if(!obj)return null;
-    return URL.createObjectURL(obj.thumb||obj.blob);
+    const source=obj.thumb||(photo(id)?.type?.startsWith('video/')?null:obj.blob);
+    return source?URL.createObjectURL(source):null;
   }
   const key=id+'f';if(urls.has(key))return urls.get(key);
   const obj=await txGet('assets',id);if(!obj)return null;
@@ -152,7 +153,79 @@ function confirmDelete(ids){if(!ids.length)return;ui.pendingIds=ids;modal('写�
 async function addGroup(){modal('新しいグループ',`<label>グループ名</label><input id="newGroupName" maxlength="48" placeholder="例：旅行"><div class="actions"><button class="secondary" data-action="close-modal">キャンセル</button><button class="primary" data-action="save-group">作成する</button></div>`);$('#newGroupName').focus()}
 function groupOptions(){const g=state.groups[ui.group];if(!g)return;modal('グループ設定',`<label>グループ名</label><input id="editGroupName" maxlength="48" value="${esc(g.name)}"><div class="actions"><button class="secondary" data-action="delete-group">グループ削除</button><button class="primary" data-action="save-group-name">名前を変更</button></div><p>グループだけを削除しても、写真そのものは削除されません。</p>`)}
 async function hashPin(salt,pin){const bytes=new TextEncoder().encode(salt+':'+pin);let out=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(out)].map(x=>x.toString(16).padStart(2,'0')).join('')}
-async function makeThumb(file){if(file.type.startsWith('video/'))return null;let url=URL.createObjectURL(file);try{const im=new Image();im.src=url;await im.decode();let scale=Math.min(1,256/Math.max(im.naturalWidth,im.naturalHeight));let c=document.createElement('canvas');c.width=Math.max(1,Math.round(im.naturalWidth*scale));c.height=Math.max(1,Math.round(im.naturalHeight*scale));c.getContext('2d').drawImage(im,0,0,c.width,c.height);let thumb=await new Promise(res=>c.toBlob(res,'image/jpeg',.78));return thumb||file}catch(e){return file}finally{URL.revokeObjectURL(url)}}
+let videoFallbackThumb=null;
+async function fallbackVideoThumb(){
+  if(videoFallbackThumb)return videoFallbackThumb;
+  const c=document.createElement('canvas');c.width=256;c.height=256;
+  const x=c.getContext('2d');x.fillStyle='#303432';x.fillRect(0,0,256,256);x.fillStyle='#fff';x.beginPath();x.moveTo(105,78);x.lineTo(105,178);x.lineTo(181,128);x.closePath();x.fill();
+  videoFallbackThumb=await new Promise(res=>c.toBlob(res,'image/jpeg',.72));
+  return videoFallbackThumb;
+}
+function onceEvent(el,name,timeout=8000){
+  return new Promise((resolve,reject)=>{
+    let timer=setTimeout(()=>{cleanup();reject(new Error(name+' timeout'))},timeout);
+    const ok=()=>{cleanup();resolve()},bad=()=>{cleanup();reject(el.error||new Error(name+' error'))};
+    function cleanup(){clearTimeout(timer);el.removeEventListener(name,ok);el.removeEventListener('error',bad)}
+    el.addEventListener(name,ok,{once:true});el.addEventListener('error',bad,{once:true});
+  });
+}
+async function makeVideoThumb(file){
+  const url=URL.createObjectURL(file),v=document.createElement('video');
+  v.preload='metadata';v.muted=true;v.playsInline=true;v.setAttribute('playsinline','');v.src=url;
+  try{
+    await onceEvent(v,'loadedmetadata');
+    const duration=Number.isFinite(v.duration)?v.duration:0;
+    const t=duration>0.25?Math.min(1,Math.max(.08,duration*.05)):0;
+    if(t>0){v.currentTime=t;await onceEvent(v,'seeked')}
+    else if(v.readyState<2)await onceEvent(v,'loadeddata');
+    const w=v.videoWidth||256,h=v.videoHeight||256,scale=Math.min(1,256/Math.max(w,h));
+    const c=document.createElement('canvas');c.width=Math.max(1,Math.round(w*scale));c.height=Math.max(1,Math.round(h*scale));
+    c.getContext('2d').drawImage(v,0,0,c.width,c.height);
+    const thumb=await new Promise(res=>c.toBlob(res,'image/jpeg',.76));
+    return thumb||await fallbackVideoThumb();
+  }catch(e){console.warn('動画サムネイルを作れませんでした',e);return await fallbackVideoThumb()}
+  finally{v.removeAttribute('src');try{v.load()}catch(_){}URL.revokeObjectURL(url)}
+}
+async function makeThumb(file){
+  if(file.type.startsWith('video/'))return makeVideoThumb(file);
+  let url=URL.createObjectURL(file);
+  try{
+    const im=new Image();im.src=url;await im.decode();
+    let scale=Math.min(1,256/Math.max(im.naturalWidth,im.naturalHeight));
+    let c=document.createElement('canvas');c.width=Math.max(1,Math.round(im.naturalWidth*scale));c.height=Math.max(1,Math.round(im.naturalHeight*scale));
+    c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+    let thumb=await new Promise(res=>c.toBlob(res,'image/jpeg',.78));return thumb||file
+  }catch(e){return file}finally{URL.revokeObjectURL(url)}
+}
+let videoThumbBackfillRunning=false;
+async function backfillVideoThumbs(){
+  if(videoThumbBackfillRunning)return;
+  const ids=Object.values(state.photos).filter(p=>p?.type?.startsWith('video/')).map(p=>p.id);
+  if(!ids.length)return;
+  videoThumbBackfillRunning=true;
+  let made=0,missing=0;
+  try{
+    for(const id of ids){
+      const a=await txGet('assets',id);if(a&&!a.thumb)missing++;
+    }
+    if(!missing)return;
+    toast(`動画サムネイルを準備しています（${missing}本）`);
+    for(const id of ids){
+      const a=await txGet('assets',id);if(!a||a.thumb)continue;
+      try{
+        a.thumb=await makeVideoThumb(a.blob);
+        await txPut('assets',a);
+        made++;
+        const img=[...document.querySelectorAll('img[data-img-id]')].find(x=>x.dataset.imgId===id);
+        if(img){releaseThumb(img);img.dataset.thumbWanted='1';queueThumb(img,thumbEpoch)}
+      }catch(e){console.warn('既存動画のサムネイル保存に失敗',e)}
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+  }finally{
+    videoThumbBackfillRunning=false;
+    if(made)toast(`動画サムネイルを${made}本準備しました。次回から軽く表示できます`);
+  }
+}
 // The iOS photo picker must finish preparing files before this function can begin.
 // Afterwards, commit small batches atomically so an interrupted import keeps completed batches.
 const importKey=p=>[p.name,p.size,p.modified].join('\u0000');
@@ -325,5 +398,5 @@ $('#content').addEventListener('pointerup',async e=>{if(selectSweep&&selectSweep
 $('#content').addEventListener('pointercancel',()=>{stopSweep(true);if(drag?.source)drag.source.style.opacity='';clearDrag()});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){ui.unlocked=false;ui.viewerId=null;$('#viewer')?.remove()}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(ui.viewerId)closeViewer();else if($('#popups').children.length)closePopup()}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}});
-(async()=>{try{db=await openDb();let old=await txGet('settings','state');if(old)state=old;render();if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(console.warn)}catch(e){console.error(e);$('#content').innerHTML='<div class="empty"><h2>データベースを開けませんでした</h2><p>Safariの通常モードでHTTPSのURLから開いてください。</p></div>'}})();
+(async()=>{try{db=await openDb();let old=await txGet('settings','state');if(old)state=old;render();setTimeout(()=>backfillVideoThumbs().catch(console.warn),250);if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(console.warn)}catch(e){console.error(e);$('#content').innerHTML='<div class="empty"><h2>データベースを開けませんでした</h2><p>Safariの通常モードでHTTPSのURLから開いてください。</p></div>'}})();
 </script></body></html>
