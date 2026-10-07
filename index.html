@@ -502,7 +502,7 @@ async function exportBackup(){closePopup();toast('バックアップを作成中
 async function fromDataUrl(str){let rsp=await fetch(str);return await rsp.blob()}
 async function restoreBackup(f){
   if(!f)return;let data;
-  if(Object.keys(state.photos).length){toast('既存の写真を守るため、全データ復元は空の保存領域でのみ可能です');return}
+  if(Object.keys(state.photos).length||Object.keys(state.groups).length){toast('既存の整理データを守るため、全データ復元は空の保存領域でのみ可能です');return}
   try{
     data=JSON.parse(await f.text());
     if(data.format!=='NagisaPhotoSortBackupV1'||!data.state?.photos||!data.assets||Object.keys(data.state.photos).some(id=>!data.assets[id]?.blob))throw new Error('format');
@@ -514,7 +514,7 @@ async function restoreBackup(f){
     for(const [id,o] of Object.entries(data.assets))assets.push({id,blob:await fromDataUrl(o.blob),thumb:o.thumb?await fromDataUrl(o.thumb):null});
     await new Promise((resolve,reject)=>{
       const tr=db.transaction(['assets','settings'],'readwrite');
-      try{for(const item of assets)tr.objectStore('assets').put(item);tr.objectStore('settings').put(data.state,'state')}
+      try{for(const item of assets)tr.objectStore('assets').add(item);tr.objectStore('settings').put(data.state,'state')}
       catch(e){tr.abort();reject(e);return}
       tr.oncomplete=resolve;tr.onerror=()=>reject(tr.error||new Error('復元に失敗しました'));tr.onabort=()=>reject(tr.error||new Error('復元が中断されました'));
     });
