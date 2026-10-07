@@ -54,14 +54,14 @@ async function openDbRetry(){
   throw last||new Error('IndexedDB open failed')
 }
 function txGet(store,key){return new Promise((res,rej)=>{const r=db.transaction(store,'readonly').objectStore(store).get(key);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
-function txPut(store,value,key){return new Promise((res,rej)=>{const r=db.transaction(store,'readwrite').objectStore(store).put(value,...(key===undefined?[]:[key]));r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
+function txPut(store,value,key){return new Promise((res,rej)=>{const tr=db.transaction(store,'readwrite');tr.objectStore(store).put(value,...(key===undefined?[]:[key]));tr.oncomplete=()=>res();tr.onerror=()=>rej(tr.error||new Error('保存処理エラー'));tr.onabort=()=>rej(tr.error||new Error('保存が中断されました'))})}
 function txDelete(store,key){return new Promise((res,rej)=>{const r=db.transaction(store,'readwrite').objectStore(store).delete(key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
-async function persist(){try{await txPut('settings',state,'state')}catch(e){console.error(e);toast('保存に失敗しました。空き容量を確認してね')}}
+async function persist(){try{await txPut('settings',state,'state')}catch(e){console.error(e);toast('保存に失敗しました。空き容量を確認してね');throw e}}
 function snapshot(){return JSON.stringify(state)}
-async function change(fn){history.push(snapshot());if(history.length>45)history.shift();future=[];fn();await persist();render()}
-async function changeWithoutRender(fn){history.push(snapshot());if(history.length>45)history.shift();future=[];fn();await persist();header()}
-async function undo(){if(!history.length)return;future.push(snapshot());state=JSON.parse(history.pop());await persist();render();toast('一つ戻しました')}
-async function redo(){if(!future.length)return;history.push(snapshot());state=JSON.parse(future.pop());await persist();render();toast('一つ進みました')}
+async function change(fn){const before=snapshot();try{fn();await persist()}catch(e){state=JSON.parse(before);render();throw e}history.push(before);if(history.length>45)history.shift();future=[];render()}
+async function changeWithoutRender(fn){const before=snapshot();try{fn();await persist()}catch(e){state=JSON.parse(before);render();throw e}history.push(before);if(history.length>45)history.shift();future=[];header()}
+async function undo(){if(!history.length)return;const before=snapshot(),previous=history[history.length-1];state=JSON.parse(previous);try{await persist()}catch(e){state=JSON.parse(before);render();throw e}history.pop();future.push(before);render();toast('一つ戻しました')}
+async function redo(){if(!future.length)return;const before=snapshot(),next=future[future.length-1];state=JSON.parse(next);try{await persist()}catch(e){state=JSON.parse(before);render();throw e}future.pop();history.push(before);render();toast('一つ進みました')}
 function toast(txt){$('.notice')?.remove();const el=document.createElement('div');el.className='notice';el.textContent=txt;document.body.append(el);setTimeout(()=>el.remove(),2400)}
 function photo(id){return state.photos[id]}
 function available(p){return p&&!p.deletedAt}
@@ -217,14 +217,14 @@ function syncRegularSelectionUI(updateHeader=true){
   if(updateHeader)header();
   if(ui.selected&&ui.arrange){ui.arrange=false;ui.moveId=null;$('.arrange')?.remove()}
   gallery?.classList.toggle('select-mode',ui.selected);
-  $('#gallery .tile[data-photo-id]').forEach(tile=>{tile.classList.toggle('selected',ui.selected&&ui.ids.has(tile.dataset.photoId));if(!ui.arrange)tile.classList.remove('drag-ready','move-from')});
+  $$('#gallery .tile[data-photo-id]').forEach(tile=>{tile.classList.toggle('selected',ui.selected&&ui.ids.has(tile.dataset.photoId));if(!ui.arrange)tile.classList.remove('drag-ready','move-from')});
   $('#toolArea').innerHTML=regularSelectionToolbar();
   if(c)c.scrollTop=top;
 }
 function syncTrashSelectionUI(updateHeader=true){
   const c=$('#content'),top=c?.scrollTop??0;if(updateHeader)header();
   c?.classList.toggle('trash-select-mode',ui.trashSelecting);
-  $('.trash-row[data-trash-id]').forEach(row=>{const selected=ui.trashSelecting&&ui.trashIds.has(row.dataset.trashId);row.classList.toggle('selected',selected);row.classList.toggle('selectable',ui.trashSelecting);const check=row.querySelector('.trash-check');if(check)check.textContent=selected?'✓':''});
+  $$('.trash-row[data-trash-id]').forEach(row=>{const selected=ui.trashSelecting&&ui.trashIds.has(row.dataset.trashId);row.classList.toggle('selected',selected);row.classList.toggle('selectable',ui.trashSelecting);const check=row.querySelector('.trash-check');if(check)check.textContent=selected?'✓':''});
   $('#toolArea').innerHTML=trashSelectionToolbar();
   if(c)c.scrollTop=top;
 }
