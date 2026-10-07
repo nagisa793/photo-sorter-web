@@ -34,7 +34,7 @@
 <div id="app"><header id="header" class="header"></header><main id="content" class="content"></main><div id="toolArea"></div><nav class="bottom" id="bottom"></nav></div><div id="popups"></div><div id="importProgress"></div><input type="file" accept="image/*,video/*" multiple id="importFiles" hidden><input type="file" accept="application/json" id="restoreFile" hidden>
 <script>
 'use strict';
-const APP_BUILD='v24-recovery';
+const APP_BUILD='v25-fixed-controls';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const uuid=()=>globalThis.crypto?.randomUUID?.()||('p'+Date.now().toString(36)+Math.random().toString(36).slice(2));
