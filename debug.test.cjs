@@ -75,3 +75,19 @@ test('existing 900 photo records keep their IDs and default order', () => {
   assert.equal(ids[899],'photo-899');
   assert.equal(Object.keys(photos).length,900);
 });
+
+test('storage diagnosis reads counts without writing to IndexedDB', async () => {
+  const operations = [];
+  const context = {
+    db:{transaction(name,mode){operations.push([name,mode]);return {objectStore(){return {count(){const r={};queueMicrotask(()=>{r.result=900;r.onsuccess()});return r}}}}}},
+    txGet:async(store,key)=>{operations.push([store,key]);return {photos:{a:{},b:{}},groups:{g:{}}}},
+    location:{origin:'https://example.test'},window:{matchMedia:()=>({matches:true})},navigator:{standalone:false},
+  };
+  vm.createContext(context);
+  vm.runInContext(extract('storageDiagnostics'),context);
+  const result=await context.storageDiagnostics();
+  assert.equal(result.assets,900);
+  assert.equal(result.records,2);
+  assert.equal(result.groups,1);
+  assert.deepEqual(operations,[['assets','readonly'],['settings','state']]);
+});
