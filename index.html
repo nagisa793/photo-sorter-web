@@ -145,7 +145,6 @@ async function loadOneThumb(job){
     }
   }
   finally{
-    if(url)try{URL.revokeObjectURL(url)}catch(_){}
     if(img?.dataset)delete img.dataset.thumbLoading;
   }
 }
@@ -188,9 +187,6 @@ function loadThumbs(root=document){
   ensureVisibleThumbs(false);
 }
 function bindThumbRecovery(imgs){
-  for(const img of imgs){
-    if(img.dataset.thumbRecoveryBound)return;
-  }
   for(const img of imgs){
     if(img.dataset.thumbRecoveryBound)continue;
     img.dataset.thumbRecoveryBound='1';
