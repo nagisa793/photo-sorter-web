@@ -40,7 +40,7 @@ const icons={undo:'<path d="M9 4 4 9l5 5M4 9h9c4 0 7 3 7 7s-3 5-7 5"/>',redo:'<p
 function svg(k){return `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[k]||''}</svg>`}
 const blank=()=>({version:1,photos:{},allOrder:[],manualViewAll:null,hiddenOrder:[],groups:{},groupOrder:[],sort:{all:'manual',hidden:'manual',groups:{}},pinSalt:null,pinHash:null});
 let importing=false,importStopRequested=false;
-let state=blank(),db,history=[],future=[],urls=new Map(),ui={tab:'all',group:null,page:null,selected:false,ids:new Set(),menu:null,arrange:false,moveId:null,unlocked:false,search:false,query:'',viewerId:null,viewerList:[],dialog:null,trashSelecting:false,trashIds:new Set(),groupArrange:false,pendingGroupId:null};
+let state=blank(),db,history=[],future=[],urls=new Map(),thumbUrls=new Map(),thumbUrlPromises=new Map(),ui={tab:'all',group:null,page:null,selected:false,ids:new Set(),menu:null,arrange:false,moveId:null,unlocked:false,search:false,query:'',viewerId:null,viewerList:[],dialog:null,trashSelecting:false,trashIds:new Set(),groupArrange:false,pendingGroupId:null};
 function openDb(){return new Promise((res,rej)=>{const r=indexedDB.open('NagisaPhotoSortV1',1);r.onupgradeneeded=()=>{const d=r.result;d.createObjectStore('assets',{keyPath:'id'});d.createObjectStore('settings')};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
 function txGet(store,key){return new Promise((res,rej)=>{const r=db.transaction(store,'readonly').objectStore(store).get(key);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
 function txPut(store,value,key){return new Promise((res,rej)=>{const r=db.transaction(store,'readwrite').objectStore(store).put(value,...(key===undefined?[]:[key]));r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
@@ -72,36 +72,43 @@ function scrollToLatest(){
     const safeBottom=Math.min(cr.bottom,br?.top??cr.bottom)-2;
     const lr=last.getBoundingClientRect();
     if(lr.bottom>safeBottom)c.scrollTop+=lr.bottom-safeBottom;
+    ensureVisibleThumbs(true);
   }))
 }
 function viewStartsAtLatest(){return !ui.search&&!ui.page&&ui.tab!=='trash'&&!(ui.tab==='groups'&&!ui.group)&&!(ui.tab==='hidden'&&!ui.unlocked)}
 function setTab(tab){closePopup();ui.tab=tab;ui.group=null;ui.page=null;ui.selected=false;ui.ids.clear();ui.arrange=false;ui.moveId=null;ui.search=false;ui.menu=null;ui.viewerId=null;ui.trashSelecting=false;ui.trashIds.clear();ui.groupArrange=false;if(tab!=='hidden')ui.unlocked=false;render();if(viewStartsAtLatest())scrollToLatest();else $('#content').scrollTop=0}
 function header(){const inTrash=ui.page==='trash'||ui.tab==='trash';let title=inTrash?'最近削除した項目':ui.search?'検索':ui.tab==='all'?'すべて':ui.tab==='hidden'?'非公開':ui.group&&state.groups[ui.group]?state.groups[ui.group].name:'グループ';let back=!!(ui.group||ui.page||ui.search);$('#header').innerHTML=`${back?`<button class="iconbtn" data-action="back" aria-label="戻る">${svg('back')}</button>`:''}<h1>${esc(title)}</h1><div class="h-actions"><button class="iconbtn" data-action="undo" ${!history.length?'disabled':''} aria-label="一つ戻る">${svg('undo')}</button><button class="iconbtn" data-action="redo" ${!future.length?'disabled':''} aria-label="一つ進む">${svg('redo')}</button>${!inTrash?`<button class="iconbtn" data-action="search" aria-label="検索">${svg('search')}</button><button class="iconbtn" data-action="sort" aria-label="ソート">${svg('sort')}</button>`:''}${inTrash?`<button class="selectbtn" data-action="trash-select">${ui.trashSelecting?'完了':'一括選択'}</button>`:!ui.page&&!ui.search&&!(ui.tab==='hidden'&&!ui.unlocked)&&!(ui.tab==='groups'&&!ui.group)?`<button class="selectbtn" data-action="select">${ui.selected?'完了':'一括選択'}</button>`:''}<button class="iconbtn" data-action="more" aria-label="その他メニュー">${svg('dots')}</button></div>`}
 function bottom(){let tabs=[['all','すべて','all'],['groups','グループ','group'],['hidden','非公開','lock'],['trash','ゴミ箱','trash']];$('#bottom').innerHTML=tabs.map(([t,label,ico])=>`<button class="tab ${ui.tab===t?'active':''}" data-tab="${t}" aria-label="${label}">${svg(ico)}<span>${label}</span></button>`).join('')}
-function thumb(id,opts={}){const p=photo(id);if(!p)return '';let sel=ui.ids.has(id),locked=opts.locked;return `<div class="tile ${sel?'selected':''} ${ui.moveId===id?'move-from':''} ${ui.arrange?'drag-ready':''}" data-photo-id="${id}">${locked?'<span class="hidden-icon">🔒</span>':`<img decoding="async" data-img-id="${id}" alt="${esc(p.name)}">${p.type.startsWith('video/')?'<span class="vid">▶ 動画</span>':''}`}</div>`}
+function cachedThumbAttrs(id){const u=thumbUrls.get(id);return u?` src="${esc(u)}" data-thumb-url="${esc(u)}" data-thumb-loaded="1"`:''}
+function thumb(id,opts={}){const p=photo(id);if(!p)return '';let sel=ui.ids.has(id),locked=opts.locked;return `<div class="tile ${sel?'selected':''} ${ui.moveId===id?'move-from':''} ${ui.arrange?'drag-ready':''}" data-photo-id="${id}">${locked?'<span class="hidden-icon">🔒</span>':`<img decoding="async" data-img-id="${id}"${cachedThumbAttrs(id)} alt="${esc(p.name)}">${p.type.startsWith('video/')?'<span class="vid">▶ 動画</span>':''}`}</div>`}
 async function assetUrl(id,thumbnail=true){
   if(thumbnail){
-    const obj=await txGet('assets',id);if(!obj)return null;
-    const source=obj.thumb||(photo(id)?.type?.startsWith('video/')?null:obj.blob);
-    return source?URL.createObjectURL(source):null;
+    if(thumbUrls.has(id))return thumbUrls.get(id);
+    if(thumbUrlPromises.has(id))return thumbUrlPromises.get(id);
+    const task=(async()=>{
+      const obj=await txGet('assets',id);if(!obj)return null;
+      const source=obj.thumb||(photo(id)?.type?.startsWith('video/')?null:obj.blob);if(!source)return null;
+      const url=URL.createObjectURL(source);thumbUrls.set(id,url);return url
+    })().finally(()=>thumbUrlPromises.delete(id));
+    thumbUrlPromises.set(id,task);return task;
   }
   const key=id+'f';if(urls.has(key))return urls.get(key);
   const obj=await txGet('assets',id);if(!obj)return null;
   const url=URL.createObjectURL(obj.blob);urls.set(key,url);return url;
 }
+function invalidateThumbUrl(id){
+  const u=thumbUrls.get(id);if(u){try{URL.revokeObjectURL(u)}catch(_){}thumbUrls.delete(id)}
+  thumbUrlPromises.delete(id)
+}
+function clearThumbUrlCache(){
+  for(const u of thumbUrls.values())try{URL.revokeObjectURL(u)}catch(_){}
+  thumbUrls.clear();thumbUrlPromises.clear()
+}
 let thumbEpoch=0,thumbQueue=[],thumbActive=0,thumbObserver=null;
 const THUMB_CONCURRENCY=5;
 function releaseThumb(img){
   if(!img)return;
-  const url=img.dataset.thumbUrl;
-  if(url){try{URL.revokeObjectURL(url)}catch(_){} delete img.dataset.thumbUrl}
-  img.removeAttribute('src');
-  delete img.dataset.thumbLoaded;
-  delete img.dataset.thumbLoading;
-  delete img.dataset.thumbWanted;
-}
-function releaseThumbUrls(root=document){
-  root.querySelectorAll?.('img[data-thumb-url]').forEach(releaseThumb);
+  img.removeAttribute('src');delete img.dataset.thumbUrl;delete img.dataset.thumbLoaded;delete img.dataset.thumbLoading;delete img.dataset.thumbWanted;delete img.dataset.thumbRetries
 }
 function thumbPriority(img){
   const content=$('#content');if(!content||!img?.isConnected)return 1e9;
@@ -126,7 +133,7 @@ async function loadOneThumb(job){
     img.dataset.thumbUrl=url;
     try{await img.decode()}catch(_){}
     if(img.isConnected&&img.dataset.imgId===id&&img.dataset.thumbWanted==='1'){
-      img.dataset.thumbLoaded='1';
+      img.dataset.thumbLoaded='1';delete img.dataset.thumbRetries;delete img.dataset.thumbRepairTries;
       url=null;
     }
   }catch(e){
@@ -170,8 +177,6 @@ function loadThumbs(root=document){
           queueThumb(img,epoch);
         }else{
           delete img.dataset.thumbWanted;
-          const r=img.getBoundingClientRect(),c=content.getBoundingClientRect();
-          if(r.bottom<c.top-1400||r.top>c.bottom+1400)releaseThumb(img);
         }
       }
     },{root:content,rootMargin:'1200px 0px',threshold:0});
@@ -179,9 +184,38 @@ function loadThumbs(root=document){
   }else{
     imgs.slice(0,80).forEach(img=>queueThumb(img,epoch));
   }
+  bindThumbRecovery(imgs);
+  ensureVisibleThumbs(false);
+}
+function bindThumbRecovery(imgs){
+  for(const img of imgs){
+    if(img.dataset.thumbRecoveryBound)return;
+  }
+  for(const img of imgs){
+    if(img.dataset.thumbRecoveryBound)continue;
+    img.dataset.thumbRecoveryBound='1';
+    img.addEventListener('error',()=>{
+      if(!img.isConnected)return;
+      const tries=Number(img.dataset.thumbRepairTries||0)+1;img.dataset.thumbRepairTries=String(tries);
+      if(tries>3)return;
+      const id=img.dataset.imgId;invalidateThumbUrl(id);releaseThumb(img);img.dataset.thumbRepairTries=String(tries);img.dataset.thumbWanted='1';
+      setTimeout(()=>queueThumb(img,thumbEpoch),120*tries)
+    })
+  }
+}
+function ensureVisibleThumbs(force=false){
+  const content=$('#content');if(!content)return;
+  const cr=content.getBoundingClientRect(),margin=1000;
+  for(const img of content.querySelectorAll('img[data-img-id]')){
+    const r=img.getBoundingClientRect();if(r.bottom<cr.top-margin||r.top>cr.bottom+margin)continue;
+    if(force&&img.dataset.thumbLoaded&&(!img.getAttribute('src')||(img.complete&&img.naturalWidth===0))){
+      delete img.dataset.thumbLoaded;delete img.dataset.thumbLoading;delete img.dataset.thumbWanted
+    }
+    img.dataset.thumbWanted='1';queueThumb(img,thumbEpoch)
+  }
 }
 function closePopup(){ui.menu=null;$('#popups').innerHTML=''}
-function render(){releaseThumbUrls($('#content'));header();bottom();$('#toolArea').innerHTML='';let content=$('#content');content.classList.remove('trash-select-mode');if(ui.search)renderSearch();else if(ui.page==='trash'||ui.tab==='trash')renderTrash();else if(ui.tab==='groups'&&!ui.group)renderGroups();else if(ui.tab==='hidden'&&!ui.unlocked)renderLock();else renderGallery();syncSelectionUI(false);loadThumbs()}
+function render(){header();bottom();$('#toolArea').innerHTML='';let content=$('#content');content.classList.remove('trash-select-mode');if(ui.search)renderSearch();else if(ui.page==='trash'||ui.tab==='trash')renderTrash();else if(ui.tab==='groups'&&!ui.group)renderGroups();else if(ui.tab==='hidden'&&!ui.unlocked)renderLock();else renderGallery();syncSelectionUI(false);loadThumbs()}
 function renderGallery(){let ids=visibleIds(),content=$('#content');let cnt=ids.length;let sorted=getSort();let intro=`<div class="status"><span>${cnt}件 ${sorted==='manual'?'・手動順':'・'+({new:'新しい写真が下',old:'新しい写真が上',filename:'ファイル名順',modified:'更新が新しい写真が下'}[sorted]||'')}</span>${ui.tab==='all'?'<button data-action="import">＋ 写真を追加</button>':ui.tab==='groups'?'<button data-action="group-options">グループ設定</button>':''}</div>`;if(ui.arrange)intro+=`<div class="arrange">整理中：上下スワイプでスクロール・写真を長押しして移動<button class="textbtn" data-action="end-arrange">完了</button></div>`;if(!cnt){let h=ui.tab==='all'?'まだ写真がありません':ui.tab==='groups'?'このグループは空です':'非公開の写真はありません';content.innerHTML=intro+`<div class="empty"><div class="big">${ui.tab==='all'?'▦':ui.tab==='groups'?'▤':'🔒'}</div><h2>${h}</h2><p>${ui.tab==='all'?'iPhoneの写真を手動で取り込んで、整理を試せます。元の写真は削除しません。':'写真を一括選択して移動できます。'}</p>${ui.tab==='all'?'<button class="primary" data-action="import">写真を追加</button>':''}</div>`;return}content.innerHTML=intro+`<div class="gallery ${ui.selected?'select-mode':''}" id="gallery">${ids.map(id=>thumb(id)).join('')}</div>`}
 function renderGroups(){let content=$('#content');let cards=state.groupOrder.filter(id=>state.groups[id]).map(id=>{let g=state.groups[id],first=g.order.find(pid=>available(photo(pid))&&!photo(pid).hidden&&photo(pid).groupIds.includes(id));return `<div class="group-card" data-group-id="${id}"><div class="group-cover">${first?`<img data-img-id="${first}" alt="">`:'▤'}</div><div class="group-txt"><strong>${esc(g.name)}</strong><small>${groupCount(g)}枚</small></div><button class="group-more" data-group-menu="${id}" aria-label="${esc(g.name)}の設定">•••</button></div>`}).join('');content.innerHTML=`<div class="status"><span>${state.groupOrder.length}グループ ・ カード長押しで並べ替え</span></div><div class="group-list"><button class="group-add" data-action="add-group">＋ 新しいグループ</button>${cards}</div>`}
 function renderLock(){let s=!!state.pinHash;$('#content').innerHTML=`<div class="lockscreen"><div class="big">🔒</div><h2>${s?'非公開を開く':'非公開用パスワードの設定'}</h2><p>試作版の簡易認証です。画像データ自体の暗号化はしていないため、機密写真は取り込まないでください。</p><input id="pin" type="password" placeholder="${s?'パスワード':'4文字以上のパスワード'}" autocomplete="off"><button class="primary" data-action="${s?'unlock':'set-pin'}">${s?'解除する':'設定する'}</button></div>`}
@@ -286,7 +320,7 @@ async function backfillVideoThumbs(){
       const a=await txGet('assets',id);if(!a||a.thumb)continue;
       try{
         a.thumb=await makeVideoThumb(a.blob);
-        await txPut('assets',a);
+        await txPut('assets',a);invalidateThumbUrl(id);
         made++;
         const img=[...document.querySelectorAll('img[data-img-id]')].find(x=>x.dataset.imgId===id);
         if(img){releaseThumb(img);img.dataset.thumbWanted='1';queueThumb(img,thumbEpoch)}
@@ -449,13 +483,13 @@ function download(filename,blob){let u=URL.createObjectURL(blob);let a=document.
 const b64=blob=>new Promise((res,rej)=>{let f=new FileReader();f.onload=()=>res(f.result);f.onerror=()=>rej(f.error);f.readAsDataURL(blob)});
 async function exportBackup(){closePopup();toast('バックアップを作成中…');try{let assets={};for(const id of Object.keys(state.photos)){let a=await txGet('assets',id);if(a)assets[id]={blob:await b64(a.blob),thumb:a.thumb?await b64(a.thumb):null}}let result={format:'NagisaPhotoSortBackupV1',exportedAt:new Date().toISOString(),state,assets};download('写真整理バックアップ-'+new Date().toISOString().slice(0,10)+'.json',new Blob([JSON.stringify(result)],{type:'application/json'}));toast('バックアップを保存しました')}catch(e){console.error(e);toast('書き出しできませんでした')}}
 async function fromDataUrl(str){let rsp=await fetch(str);return await rsp.blob()}
-async function restoreBackup(f){if(!f)return;let data;try{data=JSON.parse(await f.text());if(data.format!=='NagisaPhotoSortBackupV1'||!data.state||!data.assets)throw new Error('format')}catch(e){toast('対応するバックアップではありません');return}if(!confirm('現在の整理データをバックアップの内容で置き換えます。よろしいですか？'))return;toast('復元中…');try{for(const [id,o] of Object.entries(data.assets)){await txPut('assets',{id,blob:await fromDataUrl(o.blob),thumb:o.thumb?await fromDataUrl(o.thumb):null})}state=data.state;history=[];future=[];for(let u of urls.values())URL.revokeObjectURL(u);urls.clear();await persist();setTab('all');toast('復元しました')}catch(e){console.error(e);toast('復元に失敗しました')}}
+async function restoreBackup(f){if(!f)return;let data;try{data=JSON.parse(await f.text());if(data.format!=='NagisaPhotoSortBackupV1'||!data.state||!data.assets)throw new Error('format')}catch(e){toast('対応するバックアップではありません');return}if(!confirm('現在の整理データをバックアップの内容で置き換えます。よろしいですか？'))return;toast('復元中…');try{for(const [id,o] of Object.entries(data.assets)){await txPut('assets',{id,blob:await fromDataUrl(o.blob),thumb:o.thumb?await fromDataUrl(o.thumb):null})}state=data.state;history=[];future=[];for(let u of urls.values())URL.revokeObjectURL(u);urls.clear();clearThumbUrlCache();await persist();setTab('all');toast('復元しました')}catch(e){console.error(e);toast('復元に失敗しました')}}
 async function purgeIds(ids){
   ids=[...new Set(ids)].filter(id=>photo(id)?.deletedAt);if(!ids.length)return;
   const remove=new Set(ids),next=JSON.parse(snapshot());
   ids.forEach(id=>delete next.photos[id]);next.allOrder=next.allOrder.filter(x=>!remove.has(x));next.hiddenOrder=next.hiddenOrder.filter(x=>!remove.has(x));Object.values(next.groups).forEach(g=>g.order=g.order.filter(x=>!remove.has(x)));
   await new Promise((resolve,reject)=>{const tr=db.transaction(['assets','settings'],'readwrite'),assets=tr.objectStore('assets');ids.forEach(id=>assets.delete(id));tr.objectStore('settings').put(next,'state');tr.oncomplete=resolve;tr.onerror=()=>reject(tr.error);tr.onabort=()=>reject(tr.error||new Error('完全削除が中断されました'))});
-  for(const id of ids)for(const u of [id+'t',id+'f']){if(urls.has(u))URL.revokeObjectURL(urls.get(u));urls.delete(u)}
+  for(const id of ids){invalidateThumbUrl(id);for(const u of [id+'t',id+'f']){if(urls.has(u))URL.revokeObjectURL(urls.get(u));urls.delete(u)}}
   state=next;history=[];future=[];ids.forEach(id=>ui.trashIds.delete(id));render();toast(`${ids.length}件を完全削除しました`)
 }
 async function purge(id){let p=photo(id);if(!p||!p.deletedAt)return;if(!confirm('この写真を試作アプリから完全に削除します。元のiPhone写真には影響しません。よろしいですか？'))return;await purgeIds([id])}
@@ -473,6 +507,8 @@ $('#importFiles').addEventListener('cancel',()=>toast('写真が渡されませ�
 $('#importProgress').addEventListener('click',e=>{if(e.target.closest('[data-cancel-import]')){importStopRequested=true;const btn=$('[data-cancel-import]');if(btn){btn.disabled=true;btn.textContent='中止処理中…'}}});
 $('#restoreFile').addEventListener('change',async e=>{let f=e.target.files[0];e.target.value='';await restoreBackup(f)});
 $('#content').addEventListener('input',e=>{if(e.target.id==='searchInput'){let v=e.target.value,sel=e.target.selectionStart;ui.query=v;renderSearch();let inp=$('#searchInput');inp.focus();inp.setSelectionRange(sel,sel)}});
+let thumbRepairTimer=0;
+$('#content').addEventListener('scroll',()=>{clearTimeout(thumbRepairTimer);thumbRepairTimer=setTimeout(()=>ensureVisibleThumbs(false),90)},{passive:true});
 
 // iPhone Photos-style continuous selection: hold and trace across rows/columns.
 let selectSweep=null;
@@ -595,7 +631,8 @@ $('#content').addEventListener('touchend',async e=>{
   const active=groupTouch.active;clearGroupTouch();if(active){e.preventDefault();await finishGroupDrag(true)}
 },{passive:false});
 $('#content').addEventListener('touchcancel',()=>{if(!groupTouch)return;const active=groupTouch.active;clearGroupTouch();if(active)finishGroupDrag(false)},{passive:true});
-document.addEventListener('visibilitychange',()=>{if(document.hidden){ui.unlocked=false;ui.viewerId=null;$('#viewer')?.remove()}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){ui.unlocked=false;ui.viewerId=null;$('#viewer')?.remove()}else setTimeout(()=>ensureVisibleThumbs(true),50)});
+window.addEventListener('pageshow',()=>setTimeout(()=>ensureVisibleThumbs(true),50));
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(ui.viewerId)closeViewer();else if($('#popups').children.length)closePopup()}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}});
 (async()=>{try{db=await openDb();let old=await txGet('settings','state');if(old)state=old;render();scrollToLatest();setTimeout(()=>backfillVideoThumbs().catch(console.warn),250);if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(console.warn)}catch(e){console.error(e);$('#content').innerHTML='<div class="empty"><h2>データベースを開けませんでした</h2><p>Safariの通常モードでHTTPSのURLから開いてください。</p></div>'}})();
 </script></body></html>
