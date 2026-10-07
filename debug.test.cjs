@@ -125,7 +125,7 @@ test('organization restore rejects unrelated backup without changing current pho
 
 test('incomplete full backup is refused before any database write', async () => {
   let transactions=0;const messages=[];
-  const context={state:{photos:{}},db:{transaction(){transactions++;throw Error('unexpected write')}},toast:x=>messages.push(x),confirm:()=>true,console};
+  const context={state:{photos:{},groups:{}},db:{transaction(){transactions++;throw Error('unexpected write')}},toast:x=>messages.push(x),confirm:()=>true,console};
   vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
   const incomplete={format:'NagisaPhotoSortBackupV1',state:{photos:{lost:{}}},assets:{}};
   await context.restoreBackup({text:async()=>JSON.stringify(incomplete)});
@@ -136,17 +136,24 @@ test('incomplete full backup is refused before any database write', async () => 
 
 test('full restore refuses to replace existing photo records', async () => {
   let read=false;const messages=[];
-  const context={state:{photos:{present:{}}},toast:x=>messages.push(x)};
+  const context={state:{photos:{present:{}},groups:{}},toast:x=>messages.push(x)};
   vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
   await context.restoreBackup({text:async()=>{read=true;return '{}'}});
   assert.equal(read,false);
-  assert.ok(messages.some(x=>x.includes('既存の写真を守るため')));
+  assert.ok(messages.some(x=>x.includes('既存の整理データを守るため')));
+});
+
+test('full restore refuses to replace an existing empty group', async () => {
+  let read=false;const context={state:{photos:{},groups:{kept:{id:'kept',name:'Kept',order:[]}}},toast(){}};
+  vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
+  await context.restoreBackup({text:async()=>{read=true;return '{}'}});
+  assert.equal(read,false);
 });
 
 test('failed full restore keeps current state and reports failure', async () => {
-  const messages=[],original={photos:{}};
+  const messages=[],original={photos:{},groups:{}};
   const context={state:original,toast:x=>messages.push(x),confirm:()=>true,fromDataUrl:async()=>({size:5}),console:{error(){}},
-    db:{transaction(){const tr={objectStore:()=>({put(){}}),abort(){queueMicrotask(()=>tr.onabort())}};queueMicrotask(()=>tr.onabort());return tr}}};
+    db:{transaction(){const tr={objectStore:()=>({add(){},put(){}}),abort(){queueMicrotask(()=>tr.onabort())}};queueMicrotask(()=>tr.onabort());return tr}}};
   vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
   const backup={format:'NagisaPhotoSortBackupV1',state:{photos:{new:{}}},assets:{new:{blob:'data:image/jpeg;base64,AA=='}}};
   await context.restoreBackup({text:async()=>JSON.stringify(backup)});
