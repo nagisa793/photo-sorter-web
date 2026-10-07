@@ -40,7 +40,7 @@ test('selection sync updates all tiles and all trash rows without throwing', () 
 });
 
 test('failed save does not advance state, undo or redo history', async () => {
-  const context = {state:{count:1},history:[],future:[],render:()=>{},header:()=>{},toast:()=>{},console,txPut:async()=>{throw Error('quota')}};
+  const context = {state:{count:1},history:[],future:[],render:()=>{},header:()=>{},toast:()=>{},console:{error(){}},txPut:async()=>{throw Error('quota')}};
   vm.createContext(context);
   vm.runInContext(extract('persist')+'\n'+extract('snapshot')+'\n'+extract('change')+'\n'+extract('changeWithoutRender')+'\n'+extract('undo')+'\n'+extract('redo'),context);
   await assert.rejects(context.change(()=>context.state.count++), /quota/);
@@ -51,4 +51,27 @@ test('failed save does not advance state, undo or redo history', async () => {
   assert.equal(context.state.count,1);
   assert.equal(context.history.length,1);
   assert.equal(context.future.length,0);
+});
+
+test('existing 900 photo records keep their IDs and default order', () => {
+  const photos = {}, allOrder = [];
+  for (let i = 0; i < 900; i++) {
+    const id = 'photo-' + i;
+    photos[id] = {id,importAt:i + 1,showAll:true,hidden:false,deletedAt:null};
+    allOrder.push(id);
+  }
+  const context = {
+    state:{photos,allOrder,manualViewAll:null,sort:{all:'manual'}},
+    ui:{tab:'all',page:null,group:null},
+  };
+  vm.createContext(context);
+  vm.runInContext([
+    extract('photo'),extract('available'),extract('manualNeedsReverse'),
+    extract('manualOldestFirst'),extract('getSort'),extract('visibleIds'),
+  ].join('\n'),context);
+  const ids = context.visibleIds();
+  assert.equal(ids.length,900);
+  assert.equal(ids[0],'photo-0');
+  assert.equal(ids[899],'photo-899');
+  assert.equal(Object.keys(photos).length,900);
 });
