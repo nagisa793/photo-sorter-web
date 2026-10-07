@@ -91,3 +91,81 @@ test('storage diagnosis reads counts without writing to IndexedDB', async () => 
   assert.equal(result.groups,1);
   assert.deepEqual(operations,[['assets','readonly'],['settings','state']]);
 });
+
+test('organization restore relinks 900 reimported photos without touching assets', () => {
+  const oldPhotos={},newPhotos={},oldOrder=[],newOrder=[],assets=new Map();
+  for(let i=0;i<900;i++){
+    oldPhotos['old-'+i]={id:'old-'+i,name:'IMG_'+i+'.jpg',size:100+i,modified:1000+i,groupIds:i<30?['trip']:[],showAll:i>=30,hidden:i===899,deletedAt:null};
+    newPhotos['new-'+i]={id:'new-'+i,name:'IMG_'+i+'.jpg',size:100+i,modified:1000+i,groupIds:[],showAll:true,hidden:false,deletedAt:null};
+    oldOrder.push('old-'+i);newOrder.push('new-'+i);assets.set('new-'+i,{blob:'original-'+i});
+  }
+  const current={photos:newPhotos,allOrder:newOrder,hiddenOrder:[],manualViewAll:null,groups:{existing:{id:'existing',name:'Existing',order:[]}},groupOrder:['existing'],sort:{all:'manual',hidden:'manual',groups:{}}};
+  const backup={format:'NagisaPhotoSortOrganizationV1',state:{photos:oldPhotos,allOrder:oldOrder.slice().reverse(),hiddenOrder:['old-899'],manualViewAll:null,groups:{trip:{id:'trip',name:'Trip',order:oldOrder.slice(0,30)}},groupOrder:['trip'],sort:{all:'manual',hidden:'manual',groups:{trip:'manual'}}}};
+  const context={importKey:p=>[p.name,p.size,p.modified].join('\0')};
+  vm.createContext(context);
+  vm.runInContext(extract('buildOrganizationRestore'),context);
+  const {next,matched,groups}=context.buildOrganizationRestore(backup,current);
+  assert.equal(matched,900);assert.equal(groups,1);
+  assert.equal(next.allOrder[0],'new-899');
+  assert.equal(next.photos['new-0'].showAll,false);
+  assert.equal(next.photos['new-899'].hidden,true);
+  assert.equal(JSON.stringify(next.groups.existing),JSON.stringify(current.groups.existing));
+  assert.equal(next.groups['recovered-trip'].order.length,30);
+  assert.equal(assets.size,900);
+  assert.equal(current.photos['new-0'].showAll,true);
+});
+
+test('organization restore rejects unrelated backup without changing current photos', () => {
+  const current={photos:{a:{id:'a',name:'A',size:1,modified:1,groupIds:[],showAll:true}},allOrder:['a'],hiddenOrder:[],groups:{},groupOrder:[],sort:{all:'manual',hidden:'manual',groups:{}}};
+  const backup={format:'NagisaPhotoSortOrganizationV1',state:{photos:{b:{id:'b',name:'B',size:2,modified:2}},allOrder:['b'],groupOrder:[],groups:{}}};
+  const context={importKey:p=>[p.name,p.size,p.modified].join('\0')};vm.createContext(context);vm.runInContext(extract('buildOrganizationRestore'),context);
+  assert.throws(()=>context.buildOrganizationRestore(backup,current),/一致する写真がありません/);
+  assert.equal(current.allOrder[0],'a');
+});
+
+test('incomplete full backup is refused before any database write', async () => {
+  let transactions=0;const messages=[];
+  const context={state:{photos:{},groups:{}},db:{transaction(){transactions++;throw Error('unexpected write')}},toast:x=>messages.push(x),confirm:()=>true,console};
+  vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
+  const incomplete={format:'NagisaPhotoSortBackupV1',state:{photos:{lost:{}}},assets:{}};
+  await context.restoreBackup({text:async()=>JSON.stringify(incomplete)});
+  assert.equal(transactions,0);
+  assert.ok(messages.some(x=>x.includes('完全なバックアップ')));
+  assert.equal(Object.keys(context.state.photos).length,0);
+});
+
+test('full restore refuses to replace existing photo records', async () => {
+  let read=false;const messages=[];
+  const context={state:{photos:{present:{}},groups:{}},toast:x=>messages.push(x)};
+  vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
+  await context.restoreBackup({text:async()=>{read=true;return '{}'}});
+  assert.equal(read,false);
+  assert.ok(messages.some(x=>x.includes('既存の整理データを守るため')));
+});
+
+test('full restore refuses to replace an existing empty group', async () => {
+  let read=false;const context={state:{photos:{},groups:{kept:{id:'kept',name:'Kept',order:[]}}},toast(){}};
+  vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
+  await context.restoreBackup({text:async()=>{read=true;return '{}'}});
+  assert.equal(read,false);
+});
+
+test('failed full restore keeps current state and reports failure', async () => {
+  const messages=[],original={photos:{},groups:{}};
+  const context={state:original,toast:x=>messages.push(x),confirm:()=>true,fromDataUrl:async()=>({size:5}),console:{error(){}},
+    db:{transaction(){const tr={objectStore:()=>({add(){},put(){}}),abort(){queueMicrotask(()=>tr.onabort())}};queueMicrotask(()=>tr.onabort());return tr}}};
+  vm.createContext(context);vm.runInContext(extract('restoreBackup'),context);
+  const backup={format:'NagisaPhotoSortBackupV1',state:{photos:{new:{}}},assets:{new:{blob:'data:image/jpeg;base64,AA=='}}};
+  await context.restoreBackup({text:async()=>JSON.stringify(backup)});
+  assert.equal(context.state,original);
+  assert.ok(messages.some(x=>x.includes('元の保存データは変更')));
+});
+
+test('full backup refuses to export when a photo asset is missing', async () => {
+  let downloaded=false;const messages=[];
+  const context={state:{photos:{a:{id:'a'}}},closePopup(){},toast:x=>messages.push(x),txGet:async()=>undefined,console:{error(){}},download(){downloaded=true}};
+  vm.createContext(context);vm.runInContext(extract('exportBackup'),context);
+  await context.exportBackup();
+  assert.equal(downloaded,false);
+  assert.ok(messages.some(x=>x.includes('完全なバックアップを作れませんでした')));
+});
