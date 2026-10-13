@@ -34,7 +34,7 @@
 <div id="app"><header id="header" class="header"></header><main id="content" class="content"></main><div id="toolArea"></div><nav class="bottom" id="bottom"></nav></div><div id="popups"></div><div id="importProgress"></div><input type="file" accept="image/*,video/*" multiple id="importFiles" hidden><input type="file" accept="application/json" id="restoreFile" hidden><input type="file" accept="application/json" id="organizeFile" hidden>
 <script>
 'use strict';
-const APP_BUILD='v28-group-arranging';
+const APP_BUILD='v29-thumbnail-stability';
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const uuid=()=>globalThis.crypto?.randomUUID?.()||('p'+Date.now().toString(36)+Math.random().toString(36).slice(2));
@@ -98,10 +98,10 @@ function rememberFullUrl(key,url){
   while(urls.size>3){const oldest=[...urls.keys()].find(k=>k!==ui.viewerId+'f');if(!oldest)break;URL.revokeObjectURL(urls.get(oldest));urls.delete(oldest)}
   return url;
 }
-async function assetUrl(id,thumbnail=true){
+async function assetUrl(id,thumbnail=true,fallback=false){
   if(thumbnail){
     const obj=await txGet('assets',id);if(!obj)return null;
-    const source=obj.thumb||(photo(id)?.type?.startsWith('video/')?null:obj.blob);
+    const video=photo(id)?.type?.startsWith('video/');const source=fallback?(video?await makeVideoThumb(obj.blob):obj.blob):(obj.thumb||(video?await makeVideoThumb(obj.blob):obj.blob));
     return source?URL.createObjectURL(source):null;
   }
   const key=id+'f';if(urls.has(key))return rememberFullUrl(key,urls.get(key));
@@ -109,98 +109,82 @@ async function assetUrl(id,thumbnail=true){
   const url=URL.createObjectURL(obj.blob);return rememberFullUrl(key,url);
 }
 let thumbEpoch=0,thumbQueue=[],thumbActive=0,thumbObserver=null;
-const THUMB_CONCURRENCY=5;
+const THUMB_CONCURRENCY=5,thumbJobs=new WeakMap();
 function releaseThumb(img){
   if(!img)return;
+  thumbJobs.delete(img);
   const url=img.dataset.thumbUrl;
   if(url){try{URL.revokeObjectURL(url)}catch(_){} delete img.dataset.thumbUrl}
   img.removeAttribute('src');
-  delete img.dataset.thumbLoaded;
-  delete img.dataset.thumbLoading;
-  delete img.dataset.thumbWanted;
+  delete img.dataset.thumbLoaded;delete img.dataset.thumbLoading;delete img.dataset.thumbWanted;
 }
-function releaseThumbUrls(root=document){
-  root.querySelectorAll?.('img[data-thumb-url]').forEach(releaseThumb);
+function releaseThumbUrls(root=document){root.querySelectorAll?.('img[data-thumb-url]').forEach(releaseThumb)}
+function thumbPriority(img){const c=$('#content');if(!c||!img?.isConnected)return 1e9;const a=img.getBoundingClientRect(),b=c.getBoundingClientRect();return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2)}
+function queueThumb(img,epoch=thumbEpoch){
+  if(epoch!==thumbEpoch||!img?.isConnected||thumbJobs.has(img))return;
+  if(img.dataset.thumbLoaded&&img.complete&&img.naturalWidth>0)return;
+  if(Number(img.dataset.thumbRetryAt||0)>Date.now())return;
+  img.dataset.thumbWanted='1';img.dataset.thumbLoading='1';
+  const job={img,id:img.dataset.imgId,epoch,priority:thumbPriority(img)};
+  thumbJobs.set(img,job);thumbQueue.push(job);thumbQueue.sort((a,b)=>a.priority-b.priority);pumpThumbs();
 }
-function thumbPriority(img){
-  const content=$('#content');if(!content||!img?.isConnected)return 1e9;
-  const a=img.getBoundingClientRect(),b=content.getBoundingClientRect();
-  return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2);
-}
-function queueThumb(img,epoch){
-  if(!img?.isConnected||img.dataset.thumbLoaded||img.dataset.thumbLoading)return;
-  img.dataset.thumbWanted='1';
-  img.dataset.thumbLoading='1';
-  thumbQueue.push({img,id:img.dataset.imgId,epoch,priority:thumbPriority(img)});
-  thumbQueue.sort((a,b)=>a.priority-b.priority);
-  pumpThumbs();
+function currentThumbJob(job){return thumbJobs.get(job.img)===job&&job.epoch===thumbEpoch&&job.img.isConnected&&job.img.dataset.imgId===job.id}
+async function prepareThumb(id,fallback=false){
+  let expired=false,timer,url=null;
+  const work=(async()=>{url=await assetUrl(id,true,fallback);if(expired){if(url)URL.revokeObjectURL(url);url=null;return null}if(!url)throw Error('画像データがありません');const probe=new Image();probe.src=url;await probe.decode();if(!probe.naturalWidth)throw Error('画像を表示できません');return url})();
+  try{return await Promise.race([work,new Promise((_,reject)=>{timer=setTimeout(()=>{expired=true;reject(Error('画像の読み込みがタイムアウトしました'))},15000)})])}
+  catch(e){if(url){URL.revokeObjectURL(url);url=null}throw e}finally{clearTimeout(timer)}
 }
 async function loadOneThumb(job){
-  const {img,id,epoch}=job;let url=null;
+  const {img,id}=job;let url=null;
   try{
-    if(epoch!==thumbEpoch||!img.isConnected||img.dataset.thumbWanted!=='1')return;
-    url=await assetUrl(id,true);
-    if(!url||epoch!==thumbEpoch||!img.isConnected||img.dataset.thumbWanted!=='1')return;
-    img.src=url;
-    img.dataset.thumbUrl=url;
-    try{await img.decode()}catch(_){}
-    if(img.isConnected&&img.dataset.imgId===id&&img.dataset.thumbWanted==='1'){
-      img.dataset.thumbLoaded='1';
-      url=null;
-    }
+    if(!currentThumbJob(job))return;
+    try{url=await prepareThumb(id)}catch(e){if(!currentThumbJob(job))return;url=await prepareThumb(id,true)}
+    if(!currentThumbJob(job))return;
+    const old=img.dataset.thumbUrl;
+    img.src=url;img.dataset.thumbUrl=url;img.dataset.thumbLoaded='1';
+    delete img.dataset.thumbRetries;delete img.dataset.thumbRetryAt;
+    const assigned=url;img.onerror=()=>{if(img.isConnected&&img.dataset.thumbUrl===assigned){delete img.dataset.thumbLoaded;delete img.dataset.thumbRetryAt;scheduleThumbScan()}};
+    url=null;
+    if(old)URL.revokeObjectURL(old);
   }catch(e){
-    console.warn('サムネイル読み込み失敗',e);
-    const tries=Number(img?.dataset?.thumbRetries||0)+1;
-    if(img?.dataset)img.dataset.thumbRetries=String(tries);
-    if(tries<=2&&epoch===thumbEpoch&&img?.isConnected&&img.dataset.thumbWanted==='1'){
-      setTimeout(()=>{if(img.isConnected&&img.dataset.thumbWanted==='1'&&!img.dataset.thumbLoaded)queueThumb(img,epoch)},180*tries);
+    if(currentThumbJob(job)){
+      delete img.dataset.thumbLoaded;
+      const tries=Number(img.dataset.thumbRetries||0)+1;img.dataset.thumbRetries=String(tries);
+      const delay=Math.min(30000,300*Math.pow(2,Math.min(tries,7)));img.dataset.thumbRetryAt=String(Date.now()+delay);
+      setTimeout(()=>{if(img.isConnected)scheduleThumbScan()},delay);
     }
-  }
-  finally{
-    if(url)try{URL.revokeObjectURL(url)}catch(_){}
-    if(img?.dataset)delete img.dataset.thumbLoading;
+  }finally{
+    if(url)URL.revokeObjectURL(url);
+    if(thumbJobs.get(img)===job){thumbJobs.delete(img);delete img.dataset.thumbLoading}
   }
 }
 function pumpThumbs(){
-  while(thumbActive<THUMB_CONCURRENCY&&thumbQueue.length){
-    const job=thumbQueue.shift();
-    if(job.epoch!==thumbEpoch||!job.img?.isConnected||job.img.dataset.thumbWanted!=='1'){
-      if(job.img?.dataset)delete job.img.dataset.thumbLoading;
-      continue;
-    }
-    thumbActive++;
-    loadOneThumb(job).finally(()=>{thumbActive--;requestAnimationFrame(pumpThumbs)});
-  }
+  while(thumbActive<THUMB_CONCURRENCY&&thumbQueue.length){const job=thumbQueue.shift();if(!currentThumbJob(job)){if(thumbJobs.get(job.img)===job){thumbJobs.delete(job.img);delete job.img.dataset.thumbLoading}continue}thumbActive++;loadOneThumb(job).finally(()=>{thumbActive--;pumpThumbs()})}
+}
+let thumbScanFrame=0;
+function scheduleThumbScan(){if(thumbScanFrame)return;thumbScanFrame=requestAnimationFrame(()=>{thumbScanFrame=0;scanVisibleThumbs()})}
+function scanVisibleThumbs(){
+  const content=$('#content');if(!content||document.hidden)return;const c=content.getBoundingClientRect();
+  for(const img of content.querySelectorAll('img[data-img-id]')){const r=img.getBoundingClientRect();if(r.bottom>=c.top-600&&r.top<=c.bottom+600){img.dataset.thumbWanted='1';queueThumb(img)}else if((r.bottom<c.top-1800||r.top>c.bottom+1800)&&!drag){releaseThumb(img)}}
 }
 function loadThumbs(root=document){
   thumbEpoch++;
-  const epoch=thumbEpoch;
-  thumbQueue.forEach(job=>{if(job.img?.dataset)delete job.img.dataset.thumbLoading});
-  thumbQueue=[];
-  thumbObserver?.disconnect();
-  const content=$('#content');
-  const imgs=[...root.querySelectorAll('img[data-img-id]')];
-  if('IntersectionObserver' in window&&content){
-    thumbObserver=new IntersectionObserver(entries=>{
-      for(const entry of entries){
-        const img=entry.target;
-        if(entry.isIntersecting){
-          img.dataset.thumbWanted='1';
-          queueThumb(img,epoch);
-        }else{
-          delete img.dataset.thumbWanted;
-          const r=img.getBoundingClientRect(),c=content.getBoundingClientRect();
-          if(r.bottom<c.top-1400||r.top>c.bottom+1400)releaseThumb(img);
-        }
-      }
-    },{root:content,rootMargin:'1200px 0px',threshold:0});
-    imgs.forEach(img=>thumbObserver.observe(img));
-  }else{
-    imgs.slice(0,80).forEach(img=>queueThumb(img,epoch));
-  }
+  for(const job of thumbQueue){if(thumbJobs.get(job.img)===job){thumbJobs.delete(job.img);delete job.img.dataset.thumbLoading}}
+  thumbQueue=[];thumbObserver?.disconnect();
+  const content=$('#content'),imgs=[...root.querySelectorAll('img[data-img-id]')];
+  for(const img of imgs){thumbJobs.delete(img);delete img.dataset.thumbLoading}
+  if('IntersectionObserver' in window&&content){thumbObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)queueThumb(entry.target)}},{root:content,rootMargin:'600px 0px',threshold:0});imgs.forEach(img=>thumbObserver.observe(img))}
+  scheduleThumbScan();
 }
+// Scroll scanning also works when IntersectionObserver misses an entry or is unavailable.
+$('#content').addEventListener('scroll',scheduleThumbScan,{passive:true});
+window.addEventListener('resize',scheduleThumbScan);
+window.addEventListener('pageshow',()=>{loadThumbs();scheduleThumbScan()});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadThumbs();scheduleThumbScan()}});
+setInterval(()=>{if(!document.hidden)scheduleThumbScan()},2000);
 function closePopup(){ui.menu=null;$('#popups').innerHTML=''}
-function render(){releaseThumbUrls($('#content'));header();bottom();$('#toolArea').innerHTML='';let content=$('#content');content.classList.remove('trash-select-mode');if(ui.search)renderSearch();else if(ui.page==='trash'||ui.tab==='trash')renderTrash();else if(ui.tab==='groups'&&!ui.group)renderGroups();else if(ui.tab==='hidden'&&!ui.unlocked)renderLock();else renderGallery();syncSelectionUI(false);loadThumbs()}
+function render(){const oldImages=[...$('#content').querySelectorAll('img[data-img-id]')],ready=new Map();for(const img of oldImages){if(img.dataset.thumbLoaded&&img.complete&&img.naturalWidth>0){const list=ready.get(img.dataset.imgId)||[];list.push(img);ready.set(img.dataset.imgId,list)}}header();bottom();$('#toolArea').innerHTML='';let content=$('#content');content.classList.remove('trash-select-mode');if(ui.search)renderSearch();else if(ui.page==='trash'||ui.tab==='trash')renderTrash();else if(ui.tab==='groups'&&!ui.group)renderGroups();else if(ui.tab==='hidden'&&!ui.unlocked)renderLock();else renderGallery();for(const img of content.querySelectorAll('img[data-img-id]')){const old=ready.get(img.dataset.imgId)?.shift();if(old){old.alt=img.alt;img.replaceWith(old)}}for(const img of oldImages){if(!img.isConnected)releaseThumb(img)}syncSelectionUI(false);loadThumbs()}
 function renderGallery(){let ids=visibleIds(),content=$('#content');let cnt=ids.length;let sorted=getSort();let intro=`<div class="gallery-controls"><div class="status"><span>${cnt}件 ${sorted==='manual'?'・手動順':'・'+({new:'新しい写真が下',old:'新しい写真が上',filename:'ファイル名順',modified:'更新が新しい写真が下'}[sorted]||'')}</span>${ui.tab==='all'?'<button data-action="import">＋ 写真を追加</button>':ui.tab==='groups'?'<button data-action="group-options">グループ設定</button>':''}</div>`;if(ui.arrange)intro+=`<div class="arrange">写真を長押しして移動・移動元と移動先をタップでも並べ替えできます<button class="textbtn" data-action="end-arrange">完了</button></div>`;intro+='</div>';if(!cnt){const hasPhotos=Object.values(state.photos).some(available);let h=ui.tab==='all'?(hasPhotos?'「すべて」に表示する写真がありません':'まだ写真がありません'):ui.tab==='groups'?'このグループは空です':'非公開の写真はありません';content.innerHTML=intro+`<div class="empty"><div class="big">${ui.tab==='all'?'▦':ui.tab==='groups'?'▤':'🔒'}</div><h2>${h}</h2><p>${ui.tab==='all'?(hasPhotos?'グループ・非公開・表示設定を確認してください。':'「写真を追加」から写真や動画を選べます。'):(ui.tab==='groups'?'「すべて」で写真を選択して、このグループへ追加できます。':'写真を選択して「非公開へ移動」を押すと、ここに表示されます。')}</p>${ui.tab==='all'?'<button class="primary" data-action="import">＋ 写真を追加</button><button class="textbtn" data-action="diagnose-storage">保存状況を確認</button>':''}</div>`;return}content.innerHTML=intro+`<div class="gallery ${ui.selected?'select-mode':''}" id="gallery">${ids.map(id=>thumb(id)).join('')}</div>`}
 async function storageDiagnostics(){
   const assets=await new Promise((resolve,reject)=>{const tr=db.transaction('assets','readonly'),r=tr.objectStore('assets').count();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});

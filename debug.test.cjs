@@ -237,7 +237,7 @@ test('empty All distinguishes filtered photos from an empty library',()=>{
 
 test('service worker only removes old caches owned by this app',async()=>{
   const handlers={},deleted=[];
-  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v28','another-app'],delete:async name=>deleted.push(name)},Promise};
+  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v29','another-app'],delete:async name=>deleted.push(name)},Promise};
   vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/sw.js','utf8'),context);
   let done;handlers.activate({waitUntil:p=>done=p});await done;
   assert.deepEqual(deleted,['photo-sorter-ui-v1']);
@@ -307,4 +307,62 @@ test('organization backup relinks the exact manual order within a group',()=>{
   const backup={format:'NagisaPhotoSortOrganizationV1',state:{...c.state,groupOrder:['g']}};
   c.importKey=p=>p.name;vm.runInContext(extract('buildOrganizationRestore'),c);
   const result=c.buildOrganizationRestore(backup,current);assert.equal(result.next.groups['recovered-g'].manualView.join(','),'c,a,b');
+});
+
+function thumbnailContext(){
+ const revoked=[],timers=[];const c={thumbEpoch:1,thumbQueue:[],thumbActive:0,thumbObserver:null,thumbJobs:new WeakMap(),THUMB_CONCURRENCY:5,drag:null,Date,document:{hidden:false},window:{},URL:{revokeObjectURL:u=>revoked.push(u)},setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length},clearTimeout(){},requestAnimationFrame:fn=>{fn();return 1},$:()=>null,console};
+ vm.createContext(c);vm.runInContext(['releaseThumb','thumbPriority','currentThumbJob','queueThumb','loadOneThumb','pumpThumbs','scanVisibleThumbs','loadThumbs'].map(extract).join('\n'),c);
+ c.scheduleThumbScan=()=>{};
+ const image=id=>({isConnected:true,dataset:{imgId:id},complete:false,naturalWidth:0,removeAttribute(name){delete this[name]},getBoundingClientRect:()=>({top:20,bottom:120})});
+ return {c,revoked,timers,image};
+}
+
+test('thumbnail remains valid when scrolling outside observer during decoding',async()=>{
+ const {c,image,revoked}=thumbnailContext(),img=image('a');let finish;c.prepareThumb=()=>new Promise(resolve=>finish=resolve);
+ const job={img,id:'a',epoch:1};c.thumbJobs.set(img,job);img.dataset.thumbWanted='1';const work=c.loadOneThumb(job);
+ delete img.dataset.thumbWanted;finish('blob:decoded');await work;
+ assert.equal(img.src,'blob:decoded');assert.equal(img.dataset.thumbLoaded,'1');assert.deepEqual(revoked,[]);
+});
+
+test('stale thumbnail completion cannot clear or revoke a newer request',async()=>{
+ const {c,image,revoked}=thumbnailContext(),img=image('a');const pending=[];c.prepareThumb=()=>new Promise(resolve=>pending.push(resolve));
+ const old={img,id:'a',epoch:1};c.thumbJobs.set(img,old);const first=c.loadOneThumb(old);
+ c.thumbEpoch=2;const newer={img,id:'a',epoch:2};c.thumbJobs.set(img,newer);img.dataset.thumbLoading='1';const second=c.loadOneThumb(newer);
+ pending[0]('blob:stale');await first;assert.equal(c.thumbJobs.get(img),newer);assert.equal(img.dataset.thumbLoading,'1');
+ pending[1]('blob:current');await second;assert.equal(img.src,'blob:current');assert.deepEqual(revoked,['blob:stale']);assert.equal(c.thumbJobs.has(img),false);
+});
+
+test('decode failure falls back to original and never marks a failed thumbnail as loaded',async()=>{
+ const {c,image}=thumbnailContext(),img=image('a');const calls=[];c.prepareThumb=async(id,fallback)=>{calls.push(!!fallback);if(!fallback)throw Error('bad thumbnail');return 'blob:original'};
+ const job={img,id:'a',epoch:1};c.thumbJobs.set(img,job);await c.loadOneThumb(job);
+ assert.deepEqual(calls,[false,true]);assert.equal(img.dataset.thumbLoaded,'1');assert.equal(img.src,'blob:original');
+ img.onerror();assert.equal(img.dataset.thumbLoaded,undefined);
+});
+
+test('thumbnail failures keep retrying beyond two attempts without holding a loader slot',async()=>{
+ const {c,image,timers}=thumbnailContext(),img=image('a');c.prepareThumb=async()=>{throw Error('read temporarily failed')};
+ for(let i=0;i<5;i++){const job={img,id:'a',epoch:1};c.thumbJobs.set(img,job);await c.loadOneThumb(job);assert.equal(c.thumbJobs.has(img),false);assert.equal(img.dataset.thumbLoaded,undefined)}
+ assert.equal(timers.length,5);assert.equal(img.dataset.thumbRetries,'5');assert.ok(timers.every(x=>x.delay<=30000));
+});
+
+test('scroll scan reloads visible thumbnails without IntersectionObserver or an entry callback',()=>{
+ const {c,image}=thumbnailContext(),near=image('near'),far=image('far');far.getBoundingClientRect=()=>({top:5000,bottom:5100});
+ const queued=[];c.queueThumb=img=>queued.push(img.dataset.imgId);c.$=()=>({getBoundingClientRect:()=>({top:0,bottom:800}),querySelectorAll:()=>[near,far]});
+ c.scanVisibleThumbs();assert.deepEqual(queued,['near']);
+ far.getBoundingClientRect=()=>({top:400,bottom:500});c.scanVisibleThumbs();assert.deepEqual(queued,['near','near','far']);
+});
+
+test('thumbnail preparation rejects decode errors and releases failed URL; timeout releases late URL',async()=>{
+ const revoked=[],timers=[];let source;
+ const c={assetUrl:async()=> 'blob:broken',Image:class{async decode(){throw Error('decode failed')}},URL:{revokeObjectURL:u=>revoked.push(u)},setTimeout:fn=>{timers.push(fn);return 1},clearTimeout(){}};
+ vm.createContext(c);vm.runInContext(extract('prepareThumb'),c);
+ await assert.rejects(c.prepareThumb('a'),/decode failed/);assert.deepEqual(revoked,['blob:broken']);
+ c.assetUrl=()=>new Promise(resolve=>source=resolve);const late=c.prepareThumb('b');timers.at(-1)();await assert.rejects(late,/タイムアウト/);source('blob:late');await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(revoked,['blob:broken','blob:late']);
+});
+
+test('render retains already decoded images rather than replacing them with blank nodes',()=>{
+ const {c,image,revoked}=thumbnailContext(),old=image('a');old.complete=true;old.naturalWidth=256;old.dataset.thumbLoaded='1';old.dataset.thumbUrl='blob:good';old.src='blob:good';
+ let imgs=[old];const content={classList:{remove(){}},querySelectorAll:()=>imgs};
+ Object.assign(c,{$:selector=>selector==='#content'?content:{innerHTML:''},ui:{tab:'all'},header(){},bottom(){},syncSelectionUI(){},loadThumbs(){},renderGallery(){old.isConnected=false;const fresh=image('a');fresh.alt='Photo';fresh.replaceWith=node=>{node.isConnected=true;imgs=[node]};imgs=[fresh]}});
+ vm.runInContext(extract('render'),c);c.render();assert.equal(imgs[0],old);assert.equal(old.src,'blob:good');assert.deepEqual(revoked,[]);
 });
