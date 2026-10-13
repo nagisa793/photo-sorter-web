@@ -237,7 +237,7 @@ test('empty All distinguishes filtered photos from an empty library',()=>{
 
 test('service worker only removes old caches owned by this app',async()=>{
   const handlers={},deleted=[];
-  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v31','another-app'],delete:async name=>deleted.push(name)},Promise};
+  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v32','another-app'],delete:async name=>deleted.push(name)},Promise};
   vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/sw.js','utf8'),context);
   let done;handlers.activate({waitUntil:p=>done=p});await done;
   assert.deepEqual(deleted,['photo-sorter-ui-v1']);
@@ -404,7 +404,7 @@ for(const tab of ['all','groups'])test(`direct ${tab} arranging: taps only selec
  assert.equal(c.history.length,0);assert.equal(JSON.stringify(c.state),before);
  assert.equal(c.beginPhotoDrag(nodes[0],10,10),true);assert.equal(c.drag.ids.join(','),'a,c');
  const target=nodes[1];c.movePhotoDom(nodes[0],target,99);assert.equal(nodes.map(n=>n.dataset.photoId).join(','),'b,a,c');
- await c.finishPhotoDrag();assert.equal(c.history.length,1);assert.equal(c.visibleIds().join(','),'b,a,c');assert.equal(c.ui.moveIds.join(','),'a,c');assert.ok(syncs>=5);
+ await c.finishPhotoDrag();assert.equal(c.history.length,1);assert.equal(c.visibleIds().join(','),'b,a,c');assert.equal(c.ui.moveIds.length,0);assert.ok(syncs>=5);
  if(tab==='groups')assert.equal(c.state.manualViewAll.join(','),'a,b,c');else assert.equal(c.state.groups.g.manualView,undefined);
  c.ui.arrange=false;await c.undo();assert.equal(JSON.stringify(c.state),before);
 });
@@ -415,4 +415,13 @@ test('bulk toolbar contains only needed actions with Delete in the non-scrolling
  assert.equal((all.match(/data-action=/g)||[]).length,4);assert.match(all,/data-action="delete"/);
  c.ui.group='g';const group=c.regularSelectionToolbar();assert.equal((group.match(/data-action=/g)||[]).length,5);assert.match(group,/data-action="remove-group"/);
  assert.match(html,/\.selection-toolbar\{display:block;overflow:visible\}/);assert.match(html,/\.selection-actions button\{flex:1;min-width:0;white-space:normal/);
+});
+
+for(const ids of [['a'],['a','c']])test(`successful move clears ${ids.length} selected photos, failed move keeps them`,async()=>{
+ const c=groupArrangeContext();let syncs=0;const source={parentElement:{querySelectorAll:()=>['b','a','c'].map(id=>({dataset:{photoId:id}}))},classList:{remove(){}}};
+ Object.assign(c,{$:()=>({scrollTop:30}),clearDrag(){c.drag=null},syncArrangeSelectionUI(){syncs++},setTimeout(){},cancelAnimationFrame(){}});
+ vm.runInContext(extract('finishPhotoDrag'),c);
+ const start=()=>{c.ui.moveIds=[...ids];c.ui.moveId=ids[0];c.drag={kind:'photo',tab:'groups',gid:'g',ids:[...ids],bulk:ids.length>1,source,sources:[source],beforeView:['a','b','c'],autoFrame:0}};
+ start();c.persist=async()=>{throw Error('quota')};await c.finishPhotoDrag(true);assert.equal(c.ui.moveIds.join(','),ids.join(','));assert.equal(syncs,0);
+ start();c.persist=async()=>{};await c.finishPhotoDrag(true);assert.equal(c.ui.moveIds.length,0);assert.equal(c.ui.moveId,null);assert.equal(syncs,1);
 });
