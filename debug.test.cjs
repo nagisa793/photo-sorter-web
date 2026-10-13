@@ -237,7 +237,7 @@ test('empty All distinguishes filtered photos from an empty library',()=>{
 
 test('service worker only removes old caches owned by this app',async()=>{
   const handlers={},deleted=[];
-  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v29','another-app'],delete:async name=>deleted.push(name)},Promise};
+  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v30','another-app'],delete:async name=>deleted.push(name)},Promise};
   vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/sw.js','utf8'),context);
   let done;handlers.activate({waitUntil:p=>done=p});await done;
   assert.deepEqual(deleted,['photo-sorter-ui-v1']);
@@ -365,4 +365,49 @@ test('render retains already decoded images rather than replacing them with blan
  let imgs=[old];const content={classList:{remove(){}},querySelectorAll:()=>imgs};
  Object.assign(c,{$:selector=>selector==='#content'?content:{innerHTML:''},ui:{tab:'all'},header(){},bottom(){},syncSelectionUI(){},loadThumbs(){},renderGallery(){old.isConnected=false;const fresh=image('a');fresh.alt='Photo';fresh.replaceWith=node=>{node.isConnected=true;imgs=[node]};imgs=[fresh]}});
  vm.runInContext(extract('render'),c);c.render();assert.equal(imgs[0],old);assert.equal(old.src,'blob:good');assert.deepEqual(revoked,[]);
+});
+
+test('bulk movement preserves display order and handles scattered selection in both directions',()=>{
+ const c={};vm.createContext(c);vm.runInContext(extract('movePhotoBlock'),c);
+ const order=['a','b','c','d','e','f'];
+ assert.equal(c.movePhotoBlock(order,['d','b'],'f').join(','),'a,c,e,b,d,f');
+ assert.equal(c.movePhotoBlock(order,['e','c'],'a').join(','),'c,e,a,b,d,f');
+ assert.equal(c.movePhotoBlock(order,['b','d'],'f',true).join(','),'a,c,e,f,b,d');
+ assert.equal(c.movePhotoBlock(order,['b','d'],'b').join(','),order.join(','));
+ assert.equal(c.movePhotoBlock(order,['b','d'],'absent').join(','),order.join(','));
+ assert.equal(order.join(','),'a,b,c,d,e,f');
+});
+
+for(const tab of ['all','groups'])test(`bulk ${tab} movement commits once, supports undo and preserves other views`,async()=>{
+ const c=groupArrangeContext();c.ui.tab=tab;c.ui.group=tab==='groups'?'g':null;c.ui.selected=true;c.ui.ids=new Set(['c','a']);c.stopSweep=()=>{};
+ vm.runInContext(['movePhotoBlock','startBulkPhotoMove','moveBulkPhotosTo'].map(extract).join('\n'),c);
+ const before=JSON.stringify(c.state);c.startBulkPhotoMove();assert.equal(JSON.stringify(c.state),before);assert.equal(c.ui.moveIds.join(','),'a,c');assert.equal(c.ui.selected,false);
+ await c.moveBulkPhotosTo('b');assert.equal(c.history.length,1);assert.equal(c.ui.moveIds.length,0);
+ c.ui.arrange=false;assert.equal(c.visibleIds().join(','),'a,c,b');
+ assert.equal(Object.keys(c.state.photos).length,5);assert.equal(c.state.groups.other.order.join(','),'a,b,c');
+ if(tab==='groups')assert.equal(c.state.manualViewAll.join(','),'a,b,c');else assert.equal(c.state.groups.g.manualView,undefined);
+ await c.undo();assert.equal(JSON.stringify(c.state),before);
+});
+
+test('failed bulk movement preserves selection, saved state and retryable destination mode',async()=>{
+ const c=groupArrangeContext();c.ui.selected=true;c.ui.ids=new Set(['a','c']);c.stopSweep=()=>{};
+ vm.runInContext(['movePhotoBlock','startBulkPhotoMove','moveBulkPhotosTo'].map(extract).join('\n'),c);c.startBulkPhotoMove();
+ const before=JSON.stringify(c.state);c.persist=async()=>{throw Error('quota')};await assert.rejects(c.moveBulkPhotosTo('b'),/quota/);
+ assert.equal(JSON.stringify(c.state),before);assert.equal(c.ui.moveIds.join(','),'a,c');assert.equal(c.ui.arrange,true);assert.equal(c.history.length,0);
+ c.persist=async()=>{};await c.moveBulkPhotosTo('b');assert.equal(c.ui.moveIds.length,0);
+});
+
+test('bulk drag moves only selected existing tile nodes and leaves their image objects intact',()=>{
+ const order=['a','b','c','d','e'];const imgs=order.map(id=>({id}));let nodes=order.map((id,i)=>({dataset:{photoId:id},img:imgs[i],getBoundingClientRect:()=>({left:0,width:100})}));
+ const gallery={querySelectorAll:()=>nodes,insertBefore(node,ref){nodes=nodes.filter(n=>n!==node);const at=ref?nodes.indexOf(ref):nodes.length;nodes.splice(at,0,node)}};nodes.forEach(n=>n.parentElement=gallery);
+ let animations=0;const c={drag:{ids:['b','d']},photoLayout:()=>new Map(),animatePhotoLayout:()=>animations++};vm.createContext(c);vm.runInContext(extract('movePhotoBlock')+'\n'+extract('movePhotoDom'),c);
+ const source=nodes[1],target=nodes[4];c.movePhotoDom(source,target,99);
+ assert.equal(nodes.map(n=>n.dataset.photoId).join(','),'a,c,e,b,d');assert.equal(animations,1);assert.equal(nodes.find(n=>n.dataset.photoId==='b'),source);assert.equal(source.img,imgs[1]);
+});
+
+test('bulk drag cancel keeps pending selection and performs no save',async()=>{
+ const c=groupArrangeContext();let writes=0,redraws=0;c.persist=async()=>writes++;c.render=()=>redraws++;c.ui.moveIds=['a','c'];
+ const source={parentElement:{querySelectorAll:()=>['a','c','b'].map(id=>({dataset:{photoId:id}}))},classList:{remove(){}}};
+ Object.assign(c,{drag:{kind:'photo',bulk:true,ids:['a','c'],sources:[source],source,beforeView:['a','b','c'],autoFrame:0},$:()=>({scrollTop:30}),clearDrag(){c.drag=null},setTimeout(){},cancelAnimationFrame(){}});
+ vm.runInContext(extract('finishPhotoDrag'),c);await c.finishPhotoDrag(false);assert.equal(writes,0);assert.equal(redraws,1);assert.equal(c.ui.moveIds.join(','),'a,c');
 });
