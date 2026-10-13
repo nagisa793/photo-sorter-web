@@ -67,7 +67,7 @@ test('existing 900 photo records keep their IDs and default order', () => {
   vm.createContext(context);
   vm.runInContext([
     extract('photo'),extract('available'),extract('manualNeedsReverse'),
-    extract('manualOldestFirst'),extract('getSort'),extract('visibleIds'),
+    extract('manualOldestFirst'),extract('canArrangePhotos'),extract('getSort'),extract('visibleIds'),
   ].join('\n'),context);
   const ids = context.visibleIds();
   assert.equal(ids.length,900);
@@ -189,7 +189,7 @@ test('failed sort save preserves sort and keeps current menu open', async () => 
 
 test('entering arrange mode does not alter saved photo state', () => {
   const state={sort:{all:'filename'},manualViewAll:null};
-  const context={state,stateSaving:false,importing:false,ui:{tab:'all',group:null,search:false,selected:false,arrange:false},syncRegularSelectionUI(){}};
+  const context={state,stateSaving:false,importing:false,ui:{tab:'all',group:null,search:false,selected:false,arrange:false},syncRegularSelectionUI(){},canArrangePhotos:()=>true,showArrangeControls(){}};
   vm.createContext(context);vm.runInContext(extract('activateAllArrange'),context);
   assert.equal(context.activateAllArrange(['b','a']),true);
   assert.equal(state.sort.all,'filename');assert.equal(state.manualViewAll,null);
@@ -237,7 +237,7 @@ test('empty All distinguishes filtered photos from an empty library',()=>{
 
 test('service worker only removes old caches owned by this app',async()=>{
   const handlers={},deleted=[];
-  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v27','another-app'],delete:async name=>deleted.push(name)},Promise};
+  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v28','another-app'],delete:async name=>deleted.push(name)},Promise};
   vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/sw.js','utf8'),context);
   let done;handlers.activate({waitUntil:p=>done=p});await done;
   assert.deepEqual(deleted,['photo-sorter-ui-v1']);
@@ -250,4 +250,61 @@ test('opening 900 originals retains only three object URLs',async()=>{
   for(let i=0;i<900;i++){context.ui.viewerId='p'+i;await context.assetUrl('p'+i,false)}
   assert.equal(context.urls.size,3);assert.equal(revoked.length,897);assert.equal(context.urls.has('p899f'),true);
   await context.assetUrl('p899',false);assert.equal(created,900);
+});
+
+
+function groupArrangeContext(){
+  const photos=Object.fromEntries(['a','b','c','hidden','deleted'].map((id,i)=>[id,{id,importAt:i+1,name:id,modified:i,groupIds:['g','other'],showAll:true,hidden:id==='hidden',deletedAt:id==='deleted'?1:null}]));
+  const context={stateSaving:false,importing:false,state:{photos,hiddenOrder:[],allOrder:['c','b','a'],manualViewAll:['a','b','c'],groups:{g:{id:'g',order:['c','b','a','hidden','deleted']},other:{id:'other',order:['a','b','c']}},sort:{all:'manual',groups:{g:'filename',other:'manual'}}},ui:{tab:'groups',group:'g',arrange:false,selected:false,search:false},history:[],future:[],persist:async()=>{},render(){},header(){},toast(){},console:{error(){}},syncRegularSelectionUI(){},showArrangeControls(){}};
+  vm.createContext(context);vm.runInContext(['photo','available','manualNeedsReverse','manualOldestFirst','canArrangePhotos','getSort','visibleIds','savePhotoOrder','activateAllArrange','arrange','withStateSave','snapshot','change','changeWithoutRender','undo','redo','runUI'].map(extract).join('\n'),context);return context;
+}
+
+test('group arrangement persists exact order independently and survives reload, undo and redo',async()=>{
+  const c=groupArrangeContext(),before=JSON.stringify(c.state);
+  assert.equal(c.activateAllArrange(c.visibleIds()),true);assert.equal(JSON.stringify(c.state),before);
+  const order=c.visibleIds();c.arrange(order,'a','c');
+  await c.change(()=>c.savePhotoOrder(order));c.ui.arrange=false;
+  assert.equal(c.visibleIds().join(','),'b,a,c');
+  assert.equal(c.state.manualViewAll.join(','),'a,b,c');assert.equal(c.state.groups.other.order.join(','),'a,b,c');
+  assert.equal(c.state.groups.g.order.join(','),'c,b,a,hidden,deleted');assert.equal(Object.keys(c.state.photos).length,5);
+  c.state=JSON.parse(JSON.stringify(c.state));assert.equal(c.visibleIds().join(','),'b,a,c');
+  await c.undo();assert.equal(c.state.sort.groups.g,'filename');assert.equal(c.state.groups.g.manualView,undefined);
+  await c.redo();assert.equal(c.visibleIds().join(','),'b,a,c');
+  const reversed=c.visibleIds().reverse();await c.change(()=>c.savePhotoOrder(reversed));assert.equal(c.visibleIds().join(','),'c,a,b');
+});
+
+test('group drag saves group order and leaves All unchanged; failed save rolls back',async()=>{
+  const c=groupArrangeContext(),nodes=['c','a','b'].map(id=>({dataset:{photoId:id}}));let writes=0;
+  Object.assign(c,{$:()=>({scrollTop:20}),setTimeout(){},cancelAnimationFrame(){},clearDrag(){c.drag=null}});
+  vm.runInContext(extract('finishPhotoDrag'),c);
+  const start=()=>{c.drag={kind:'photo',tab:'groups',gid:'g',source:{parentElement:{querySelectorAll:()=>nodes},classList:{remove(){}}},beforeView:['a','b','c']}};
+  c.persist=async()=>{writes++};start();await c.finishPhotoDrag();c.ui.arrange=false;
+  assert.equal(writes,1);assert.equal(c.visibleIds().join(','),'c,a,b');assert.equal(c.state.manualViewAll.join(','),'a,b,c');
+  const before=JSON.stringify(c.state);nodes.reverse();c.persist=async()=>{throw Error('quota')};start();await c.finishPhotoDrag();assert.equal(JSON.stringify(c.state),before);
+});
+
+test('group touch long press enters arrangement while group list and search do not',()=>{
+  const c=groupArrangeContext(),handlers={};let timer;
+  Object.assign(c,{$:()=>({addEventListener:(name,fn)=>handlers[name]=fn}),setTimeout:fn=>{timer=fn;return 1},beginPhotoDrag:()=>true});
+  const start=script.indexOf("$('#content').addEventListener('touchstart',e=>{if(stateSaving||importing||e.touches.length!==1||ui.selected||ui.search)return;const tile=");
+  const end=script.indexOf("$('#content').addEventListener('touchmove'",start);
+  vm.runInContext('let photoTouch=null;'+script.slice(start,end),c);
+  const event={touches:[{identifier:1,clientX:10,clientY:10}],target:{closest:()=>({})}};
+  handlers.touchstart(event);timer();assert.equal(c.ui.arrange,true);assert.equal(c.state.sort.groups.g,'filename');
+  c.ui.arrange=false;c.ui.group=null;timer=null;handlers.touchstart(event);assert.equal(timer,null);
+  c.ui.group='g';c.ui.search=true;handlers.touchstart(event);assert.equal(timer,null);
+});
+
+test('group manual order preserves excluded photos and adds newly visible photos',()=>{
+  const c=groupArrangeContext();c.savePhotoOrder(['c','a','b']);c.state.photos.hidden.hidden=false;
+  assert.equal(c.visibleIds().join(','),'c,a,b,hidden');assert.equal(c.state.groups.g.order.includes('deleted'),true);
+});
+
+test('organization backup relinks the exact manual order within a group',()=>{
+  const c=groupArrangeContext();c.savePhotoOrder(['c','a','b']);
+  for(const p of Object.values(c.state.photos)){p.size=1;p.modified=1}
+  const current=JSON.parse(JSON.stringify(c.state));current.groups={};current.groupOrder=[];current.sort.groups={};
+  const backup={format:'NagisaPhotoSortOrganizationV1',state:{...c.state,groupOrder:['g']}};
+  c.importKey=p=>p.name;vm.runInContext(extract('buildOrganizationRestore'),c);
+  const result=c.buildOrganizationRestore(backup,current);assert.equal(result.next.groups['recovered-g'].manualView.join(','),'c,a,b');
 });
