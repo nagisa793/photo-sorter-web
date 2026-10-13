@@ -237,7 +237,7 @@ test('empty All distinguishes filtered photos from an empty library',()=>{
 
 test('service worker only removes old caches owned by this app',async()=>{
   const handlers={},deleted=[];
-  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v30','another-app'],delete:async name=>deleted.push(name)},Promise};
+  const context={self:{addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}},location:{origin:'https://example.test'}},caches:{keys:async()=>['photo-sorter-ui-v1','photo-sorter-ui-v31','another-app'],delete:async name=>deleted.push(name)},Promise};
   vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/sw.js','utf8'),context);
   let done;handlers.activate({waitUntil:p=>done=p});await done;
   assert.deepEqual(deleted,['photo-sorter-ui-v1']);
@@ -255,7 +255,7 @@ test('opening 900 originals retains only three object URLs',async()=>{
 
 function groupArrangeContext(){
   const photos=Object.fromEntries(['a','b','c','hidden','deleted'].map((id,i)=>[id,{id,importAt:i+1,name:id,modified:i,groupIds:['g','other'],showAll:true,hidden:id==='hidden',deletedAt:id==='deleted'?1:null}]));
-  const context={stateSaving:false,importing:false,state:{photos,hiddenOrder:[],allOrder:['c','b','a'],manualViewAll:['a','b','c'],groups:{g:{id:'g',order:['c','b','a','hidden','deleted']},other:{id:'other',order:['a','b','c']}},sort:{all:'manual',groups:{g:'filename',other:'manual'}}},ui:{tab:'groups',group:'g',arrange:false,selected:false,search:false},history:[],future:[],persist:async()=>{},render(){},header(){},toast(){},console:{error(){}},syncRegularSelectionUI(){},showArrangeControls(){}};
+  const context={stateSaving:false,importing:false,state:{photos,hiddenOrder:[],allOrder:['c','b','a'],manualViewAll:['a','b','c'],groups:{g:{id:'g',order:['c','b','a','hidden','deleted']},other:{id:'other',order:['a','b','c']}},sort:{all:'manual',groups:{g:'filename',other:'manual'}}},ui:{tab:'groups',group:'g',arrange:false,selected:false,search:false},history:[],future:[],persist:async()=>{},render(){},header(){},toast(){},console:{error(){}},syncRegularSelectionUI(){},syncArrangeSelectionUI(){},showArrangeControls(){}};
   vm.createContext(context);vm.runInContext(['photo','available','manualNeedsReverse','manualOldestFirst','canArrangePhotos','getSort','visibleIds','savePhotoOrder','activateAllArrange','arrange','withStateSave','snapshot','change','changeWithoutRender','undo','redo','runUI'].map(extract).join('\n'),context);return context;
 }
 
@@ -378,25 +378,6 @@ test('bulk movement preserves display order and handles scattered selection in b
  assert.equal(order.join(','),'a,b,c,d,e,f');
 });
 
-for(const tab of ['all','groups'])test(`bulk ${tab} movement commits once, supports undo and preserves other views`,async()=>{
- const c=groupArrangeContext();c.ui.tab=tab;c.ui.group=tab==='groups'?'g':null;c.ui.selected=true;c.ui.ids=new Set(['c','a']);c.stopSweep=()=>{};
- vm.runInContext(['movePhotoBlock','startBulkPhotoMove','moveBulkPhotosTo'].map(extract).join('\n'),c);
- const before=JSON.stringify(c.state);c.startBulkPhotoMove();assert.equal(JSON.stringify(c.state),before);assert.equal(c.ui.moveIds.join(','),'a,c');assert.equal(c.ui.selected,false);
- await c.moveBulkPhotosTo('b');assert.equal(c.history.length,1);assert.equal(c.ui.moveIds.length,0);
- c.ui.arrange=false;assert.equal(c.visibleIds().join(','),'a,c,b');
- assert.equal(Object.keys(c.state.photos).length,5);assert.equal(c.state.groups.other.order.join(','),'a,b,c');
- if(tab==='groups')assert.equal(c.state.manualViewAll.join(','),'a,b,c');else assert.equal(c.state.groups.g.manualView,undefined);
- await c.undo();assert.equal(JSON.stringify(c.state),before);
-});
-
-test('failed bulk movement preserves selection, saved state and retryable destination mode',async()=>{
- const c=groupArrangeContext();c.ui.selected=true;c.ui.ids=new Set(['a','c']);c.stopSweep=()=>{};
- vm.runInContext(['movePhotoBlock','startBulkPhotoMove','moveBulkPhotosTo'].map(extract).join('\n'),c);c.startBulkPhotoMove();
- const before=JSON.stringify(c.state);c.persist=async()=>{throw Error('quota')};await assert.rejects(c.moveBulkPhotosTo('b'),/quota/);
- assert.equal(JSON.stringify(c.state),before);assert.equal(c.ui.moveIds.join(','),'a,c');assert.equal(c.ui.arrange,true);assert.equal(c.history.length,0);
- c.persist=async()=>{};await c.moveBulkPhotosTo('b');assert.equal(c.ui.moveIds.length,0);
-});
-
 test('bulk drag moves only selected existing tile nodes and leaves their image objects intact',()=>{
  const order=['a','b','c','d','e'];const imgs=order.map(id=>({id}));let nodes=order.map((id,i)=>({dataset:{photoId:id},img:imgs[i],getBoundingClientRect:()=>({left:0,width:100})}));
  const gallery={querySelectorAll:()=>nodes,insertBefore(node,ref){nodes=nodes.filter(n=>n!==node);const at=ref?nodes.indexOf(ref):nodes.length;nodes.splice(at,0,node)}};nodes.forEach(n=>n.parentElement=gallery);
@@ -408,6 +389,30 @@ test('bulk drag moves only selected existing tile nodes and leaves their image o
 test('bulk drag cancel keeps pending selection and performs no save',async()=>{
  const c=groupArrangeContext();let writes=0,redraws=0;c.persist=async()=>writes++;c.render=()=>redraws++;c.ui.moveIds=['a','c'];
  const source={parentElement:{querySelectorAll:()=>['a','c','b'].map(id=>({dataset:{photoId:id}}))},classList:{remove(){}}};
- Object.assign(c,{drag:{kind:'photo',bulk:true,ids:['a','c'],sources:[source],source,beforeView:['a','b','c'],autoFrame:0},$:()=>({scrollTop:30}),clearDrag(){c.drag=null},setTimeout(){},cancelAnimationFrame(){}});
+ Object.assign(c,{drag:{kind:'photo',bulk:true,ids:['a','c'],sources:[source],source,beforeView:['a','b','c'],autoFrame:0},$:()=>({scrollTop:30}),clearDrag(){c.drag=null},syncArrangeSelectionUI(){},setTimeout(){},cancelAnimationFrame(){}});
  vm.runInContext(extract('finishPhotoDrag'),c);await c.finishPhotoDrag(false);assert.equal(writes,0);assert.equal(redraws,1);assert.equal(c.ui.moveIds.join(','),'a,c');
+});
+
+for(const tab of ['all','groups'])test(`direct ${tab} arranging: taps only select, long press drags selection and commits once`,async()=>{
+ const c=groupArrangeContext();c.ui.tab=tab;c.ui.group=tab==='groups'?'g':null;let syncs=0;
+ let nodes=['a','b','c'].map(id=>({isConnected:true,dataset:{photoId:id},classList:{add(){},remove(){}},getBoundingClientRect:()=>({left:0,width:100})}));
+ const gallery={querySelectorAll:()=>nodes,insertBefore(node,ref){nodes=nodes.filter(n=>n!==node);nodes.splice(ref?nodes.indexOf(ref):nodes.length,0,node)}};nodes.forEach(n=>n.parentElement=gallery);
+ Object.assign(c,{drag:null,syncArrangeSelectionUI:()=>syncs++,photoLayout:()=>new Map(),animatePhotoLayout(){},requestAnimationFrame:()=>1,cancelAnimationFrame(){},autoScrollPhotoDrag(){},makePhotoGhost:()=>({node:{append(){}}}),document:{createElement:()=>({})},$:()=>({scrollTop:42}),clearDrag(){c.drag=null},setTimeout(){}});
+ vm.runInContext("'use strict';\n"+['toggleArrangePhoto','beginPhotoDrag','movePhotoBlock','movePhotoDom','finishPhotoDrag'].map(extract).join('\n'),c);
+ const before=JSON.stringify(c.state);assert.equal(c.activateAllArrange(c.visibleIds()),true);
+ c.toggleArrangePhoto('c');c.toggleArrangePhoto('a');c.toggleArrangePhoto('c');assert.equal(c.ui.moveIds.join(','),'a');c.toggleArrangePhoto('c');assert.equal(c.ui.moveIds.join(','),'a,c');
+ assert.equal(c.history.length,0);assert.equal(JSON.stringify(c.state),before);
+ assert.equal(c.beginPhotoDrag(nodes[0],10,10),true);assert.equal(c.drag.ids.join(','),'a,c');
+ const target=nodes[1];c.movePhotoDom(nodes[0],target,99);assert.equal(nodes.map(n=>n.dataset.photoId).join(','),'b,a,c');
+ await c.finishPhotoDrag();assert.equal(c.history.length,1);assert.equal(c.visibleIds().join(','),'b,a,c');assert.equal(c.ui.moveIds.join(','),'a,c');assert.ok(syncs>=5);
+ if(tab==='groups')assert.equal(c.state.manualViewAll.join(','),'a,b,c');else assert.equal(c.state.groups.g.manualView,undefined);
+ c.ui.arrange=false;await c.undo();assert.equal(JSON.stringify(c.state),before);
+});
+
+test('bulk toolbar contains only needed actions with Delete in the non-scrolling action row',()=>{
+ const c={ui:{selected:true,ids:new Set(['a']),group:null},visibleIds:()=>['a','b']};vm.createContext(c);vm.runInContext(extract('regularSelectionToolbar'),c);
+ const all=c.regularSelectionToolbar();assert.doesNotMatch(all,/move-selected|toggle-show|選んだ写真を並べ替え|すべて表示切替/);assert.match(all,/selection-actions/);
+ assert.equal((all.match(/data-action=/g)||[]).length,4);assert.match(all,/data-action="delete"/);
+ c.ui.group='g';const group=c.regularSelectionToolbar();assert.equal((group.match(/data-action=/g)||[]).length,5);assert.match(group,/data-action="remove-group"/);
+ assert.match(html,/\.selection-toolbar\{display:block;overflow:visible\}/);assert.match(html,/\.selection-actions button\{flex:1;min-width:0;white-space:normal/);
 });
